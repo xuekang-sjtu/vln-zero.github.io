@@ -40,21 +40,54 @@
               <b>V</b>ision-<b>L</b>anguage Planning for <b>Zero</b>-Shot Transfer in Robot <b>N</b>avigation
             </h2>
             <div class="is-size-5 publication-authors">
-              <!-- <span class="author-block">
-              <a href="some link">First Last</a><sup>1</sup>,</span>
-            <span class="author-block"> -->
+              <span class="author-block">
+                <a href="https://neel1302.github.io/">Neel P. Bhatt</a><sup>*1</sup>,
+              </span>
+              <span class="author-block">
+                <a href="https://yunhaoyang234.github.io/">Yunhao Yang</a><sup>*1</sup>,
+              </span>
+              <span class="author-block">
+                <a href="https://www.linkedin.com/in/rohan-siva/">Rohan Siva</a><sup>1</sup>,
+              </span>
+              <span class="author-block">
+                <a href="https://oden.utexas.edu/people/directory/Pranay-Samineni/">Pranay Samineni</a><sup>1</sup>,
+              </span>
+              <br>
+              <span class="author-block">
+                <a href="https://www.linkedin.com/in/milan-daniel/">Daniel Milan</a><sup>1</sup>,
+              </span>
+              <span class="author-block">
+                <a href="https://express.adobe.com/page/CAdrFMJ9QeI2y/">Zhangyang Wang</a><sup>1</sup>,
+              </span>
+              <span class="author-block">
+                <a href="https://www.ae.utexas.edu/people/faculty/faculty-directory/topcu">Ufuk Topcu</a><sup>1</sup>
+              </span>
             </div>
 
-            <!-- <div class="is-size-5 publication-authors">
-            <span class="author-block"><sup>1</sup>Institution 1,</span>
-            <span class="author-block"><sup>2</sup>Institution 2</span>
-          </div> -->
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><sup>1</sup>The University of Texas at Austin</span>
+              <span class="author-block"><sup>*</sup>Equal Contribution</span>
+            </div>
+
+            <div class="is-size-5 publication-authors">
+              <p style="color: red;">Neus 2026 Spotlight</p>
+            </div>
 
             <div class="column has-text-centered">
               <div class="publication-links">
 
                 <span class="link-block">
-                  <a href="https://github.com/VLN-Zero/vln-zero.github.io"
+                  <a target="_blank" rel="noopener noreferrer" href="https://arxiv.org/abs/2509.18592"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                    </span>
+                    <span>arXiv</span>
+                  </a>
+                </span>
+
+                <span class="link-block">
+                  <a target="_blank" rel="noopener noreferrer" href="https://github.com/VLN-Zero/vln-zero.github.io"
                     class="external-link button is-normal is-rounded is-dark">
                     <span class="icon">
                       <i class="fab fa-github"></i>
@@ -64,10 +97,11 @@
                 </span>
 
                 <span class="link-block">
-                  <a href="https://github.com/VLN-Zero/vln-zero.github.io/blob/main/sample_eval.ipynb"
+                  <a target="_blank" rel="noopener noreferrer"
+                    href="https://github.com/VLN-Zero/vln-zero.github.io/blob/main/sample_eval.ipynb"
                     class="external-link button is-normal is-rounded is-dark">
                     <span class="icon">
-                      <i class="fas fa-file-pdf"></i>
+                      <i class="fas fa-book-open"></i>
                     </span>
                     <span>Demo Notebook</span>
                   </a>
@@ -185,7 +219,7 @@
                     <i class="fab fa-github fa-2x"></i>
                   </span>
                   <h3 class="title is-5">Code</h3>
-                  <a target="_blank" rel="noopener noreferrer" href="https://vln-zero.github.io/"
+                  <a target="_blank" rel="noopener noreferrer" href="https://github.com/VLN-Zero/vln-zero.github.io"
                     class="button is-link is-rounded">View Code</a>
                 </div>
               </div>
@@ -254,13 +288,62 @@
     </div>
   </section>
 
-  <!--
-<section class="section" id="BibTeX">
-  <div class="container is-max-desktop content">
-    <h2 class="title">BibTeX</h2>
-    <pre><code>bibtex will go here</code></pre>
-  </div>
-</section> -->
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">BibTeX</h2>
+      <div style="position: relative;">
+        <pre><code>@inproceedings{bhatt2025vlnzerorapidexplorationcacheenabled,
+  title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
+  author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
+  year={2026},
+  booktitle={Neus 2026 Spotlight},
+  eprint={2509.18592},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2509.18592},
+}</code></pre>
+        <button id="copyBibtex" class="button is-small"
+          style="position: absolute; top: 10px; right: 10px; opacity: 0.7; background-color: rgba(255, 255, 255, 0.7);"
+          onmouseover="this.style.opacity='1'"
+          onmouseout="this.style.opacity='0.7'"
+          onclick="copyBibtexToClipboard()">
+          <span class="icon">
+            <i class="fas fa-copy"></i>
+          </span>
+          <span>Copy</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    function copyBibtexToClipboard() {
+      const bibtexText = `@inproceedings{bhatt2025vlnzerorapidexplorationcacheenabled,
+  title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
+  author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
+  year={2026},
+  booktitle={Neus 2026 Spotlight},
+  eprint={2509.18592},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2509.18592},
+}`;
+
+      navigator.clipboard.writeText(bibtexText).then(function () {
+        const button = document.getElementById('copyBibtex');
+        const originalHTML = button.innerHTML;
+        const originalStyle = button.getAttribute('style');
+
+        button.innerHTML = '<span class="icon"><i class="fas fa-check"></i></span><span>Copied!</span>';
+        button.style = 'position: absolute; top: 10px; right: 10px; opacity: 1; background-color: #48c774;';
+
+        setTimeout(function () {
+          button.innerHTML = originalHTML;
+          button.setAttribute('style', originalStyle);
+        }, 2000);
+      });
+    }
+  </script>
 
 
   <footer class="footer">
