@@ -292,16 +292,12 @@
     <div class="container is-max-desktop content">
       <h2 class="title">BibTeX</h2>
       <div style="position: relative;">
-        <pre><code>@inproceedings{bhatt2025vlnzerorapidexplorationcacheenabled,
-  title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
-  author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
-  year={2026},
-  booktitle={NeuS 2026},
-  eprint={2509.18592},
-  archivePrefix={arXiv},
-  primaryClass={cs.RO},
-  url={https://arxiv.org/abs/2509.18592},
-}</code></pre>
+        <pre><code><span style="color: red;">@inproceedings</span>{<span style="color: purple;">bhatt2025vlnzerorapidexplorationcacheenabled</span>,
+            title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
+            author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
+            year={2026},
+            booktitle={3rd International Conference on Neuro-Symbolic Systems (NeuS)},
+      }</code></pre>
         <button id="copyBibtex" class="button is-small"
           style="position: absolute; top: 10px; right: 10px; opacity: 0.7; background-color: rgba(255, 255, 255, 0.7);"
           onmouseover="this.style.opacity='1'"
@@ -319,15 +315,11 @@
   <script>
     function copyBibtexToClipboard() {
       const bibtexText = `@inproceedings{bhatt2025vlnzerorapidexplorationcacheenabled,
-  title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
-  author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
-  year={2026},
-  booktitle={NeuS 2026},
-  eprint={2509.18592},
-  archivePrefix={arXiv},
-  primaryClass={cs.RO},
-  url={https://arxiv.org/abs/2509.18592},
-}`;
+            title={VLN-Zero: Rapid Exploration and Cache-Enabled Neurosymbolic Vision-Language Planning for Zero-Shot Transfer in Robot Navigation},
+            author={Neel P. Bhatt and Yunhao Yang and Rohan Siva and Pranay Samineni and Daniel Milan and Zhangyang Wang and Ufuk Topcu},
+            year={2026},
+            booktitle={3rd International Conference on Neuro-Symbolic Systems (NeuS)},
+      }`;
 
       navigator.clipboard.writeText(bibtexText).then(function () {
         const button = document.getElementById('copyBibtex');
