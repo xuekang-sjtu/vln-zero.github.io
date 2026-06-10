@@ -27,7 +27,7 @@ _C.TASK.ORACLE_ACTION_SENSOR.GOAL_RADIUS = 0.5
 # ----------------------------------------------------------------------------
 _C.TASK.RXR_INSTRUCTION_SENSOR = CN()
 _C.TASK.RXR_INSTRUCTION_SENSOR.TYPE = "RxRInstructionSensor"
-_C.TASK.RXR_INSTRUCTION_SENSOR.features_path = "data/datasets/RxR_VLNCE_v0/text_features/rxr_{split}/{id:06}_{lang}_text_features.npz"
+_C.TASK.RXR_INSTRUCTION_SENSOR.features_path = "../datasets/datasets/RxR_VLNCE_v0/text_features/rxr_{split}/{id:06}_{lang}_text_features.npz"
 _C.TASK.INSTRUCTION_SENSOR_UUID = "rxr_instruction"
 # ----------------------------------------------------------------------------
 # SHORTEST PATH SENSOR
@@ -65,7 +65,7 @@ _C.TASK.NDTW.TYPE = "NDTW"
 _C.TASK.NDTW.SPLIT = "val_seen"
 _C.TASK.NDTW.FDTW = True  # False: DTW
 _C.TASK.NDTW.GT_PATH = (
-    "data/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}_gt.json.gz"
+    "../datasets/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}_gt.json.gz"
 )
 _C.TASK.NDTW.SUCCESS_DISTANCE = 3.0
 # ----------------------------------------------------------------------------
@@ -112,7 +112,7 @@ _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_SHORTEST_PATH = True
 _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_REFERENCE_PATH = True
 _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_FIXED_WAYPOINTS = True
 _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_MP3D_AGENT_PATH = True
-_C.TASK.TOP_DOWN_MAP_VLNCE.GRAPHS_FILE = "data/connectivity_graphs.pkl"
+_C.TASK.TOP_DOWN_MAP_VLNCE.GRAPHS_FILE = "../datasets/connectivity_graphs.pkl"
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR = CN()
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR.DRAW = True
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR.FOV = 90

@@ -45,12 +45,12 @@ TASK:
   SUCCESS:
     SUCCESS_DISTANCE: 3.0
   NDTW:
-    GT_PATH: data/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz
+    GT_PATH: ../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz
 
 DATASET:
   TYPE: RxR-VLN-CE-v1
   SPLIT: train
   ROLES: [guide]
   LANGUAGES: [te-IN]
-  DATA_PATH: data/datasets/RxR_VLNCE_v0/{split}/{split}_{role}.json.gz
-  SCENES_DIR: data/scene_datasets/
+  DATA_PATH: ../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}.json.gz
+  SCENES_DIR: ../datasets/scene_datasets/

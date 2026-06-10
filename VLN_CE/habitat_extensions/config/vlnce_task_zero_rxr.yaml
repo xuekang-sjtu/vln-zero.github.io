@@ -41,12 +41,12 @@ TASK:
   SPL:
     SUCCESS_DISTANCE: 3.0
   NDTW:
-    GT_PATH: VLN_CE/data/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz
+    GT_PATH: ../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz
 DATASET:
   TYPE: RxR-VLN-CE-v1
   SPLIT: val_unseen
   ROLES: [guide]  # "*", "guide", "follower"
   LANGUAGES: [en-US, en-IN]  #  "*", "te-IN", "hi-IN", "en-US", "en-IN"
-  DATA_PATH: VLN_CE/data/datasets/RxR_VLNCE_v0/{split}/{split}_{role}.json.gz
-  SCENES_DIR: VLN_CE/data/scene_datasets
+  DATA_PATH: ../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}.json.gz
+  SCENES_DIR: ../datasets/scene_datasets
 

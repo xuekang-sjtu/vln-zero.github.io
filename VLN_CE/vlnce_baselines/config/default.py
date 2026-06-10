@@ -88,7 +88,7 @@ _C.IL.RECOLLECT_TRAINER.max_traj_len = -1
 _C.IL.RECOLLECT_TRAINER.effective_batch_size = -1
 _C.IL.RECOLLECT_TRAINER.preload_size = 30
 _C.IL.RECOLLECT_TRAINER.gt_file = (
-    "data/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz"
+    "../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}_gt.json.gz"
 )
 
 # ----------------------------------------------------------------------------
@@ -224,10 +224,10 @@ _C.MODEL.INSTRUCTION_ENCODER.sensor_uuid = "instruction"
 _C.MODEL.INSTRUCTION_ENCODER.vocab_size = 2504
 _C.MODEL.INSTRUCTION_ENCODER.use_pretrained_embeddings = True
 _C.MODEL.INSTRUCTION_ENCODER.embedding_file = (
-    "data/datasets/R2R_VLNCE_v1-3_preprocessed/embeddings.json.gz"
+    "../datasets/datasets/R2R_VLNCE_v1-3_preprocessed/embeddings.json.gz"
 )
 _C.MODEL.INSTRUCTION_ENCODER.dataset_vocab = (
-    "data/datasets/R2R_VLNCE_v1-3_preprocessed/train/train.json.gz"
+    "../datasets/datasets/R2R_VLNCE_v1-3_preprocessed/train/train.json.gz"
 )
 _C.MODEL.INSTRUCTION_ENCODER.fine_tune_embeddings = False
 _C.MODEL.INSTRUCTION_ENCODER.embedding_size = 50
@@ -248,7 +248,7 @@ _C.MODEL.DEPTH_ENCODER.output_size = 128
 _C.MODEL.DEPTH_ENCODER.backbone = "resnet50"
 # path to DDPPO resnet weights
 _C.MODEL.DEPTH_ENCODER.ddppo_checkpoint = (
-    "data/ddppo-models/gibson-2plus-resnet50.pth"
+    "../datasets/ddppo-models/gibson-2plus-resnet50.pth"
 )
 _C.MODEL.DEPTH_ENCODER.trainable = False
 
