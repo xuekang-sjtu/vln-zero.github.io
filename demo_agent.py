@@ -142,7 +142,7 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
 
     # It is HIGHLY RECOMMENDED to create a backup or custom file for your scene graphs
     # and change the path here to that instead.
-    SCENE_GRAPHS_PATH = "../datasets/connectivity_graphs.pkl"
+    SCENE_GRAPHS_PATH = "../datasets/connectivity/connectivity_graphs.pkl"
 
     for _ in trange(
         num_episodes, desc=config.EVAL.IDENTIFICATION + "-{}".format(split_id)

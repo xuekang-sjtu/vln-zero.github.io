@@ -142,7 +142,7 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
 
     # It is HIGHLY RECOMMENDED to create a backup or custom file for your scene graphs
     # and change the path here to that instead.
-    SCENE_GRAPHS_PATH = "../datasets/connectivity_graphs.pkl"
+    SCENE_GRAPHS_PATH = "../datasets/connectivity/connectivity_graphs.pkl"
 
     for _ in trange(
         num_episodes, desc=getattr(config.EVAL, "IDENTIFICATION", "test") + "-{}".format(split_id)
@@ -914,7 +914,7 @@ class MyGPTAgent(Agent):
             try:
                 if (use_cached_action == False):
                     response = self.client.chat.completions.create(
-                        model="gpt-4.1",
+                        model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
                         messages=messages,
                         max_tokens=300,
                         temperature=0.3,

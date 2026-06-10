@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+import os
+os.environ["MAGNUM_LOG"] = "quiet"
+os.environ["HABITAT_SIM_LOG"] = "quiet"
+
 import numpy as np
 import argparse
 import json
-import os
 from habitat.datasets import make_dataset
 from VLN_CE.vlnce_baselines.config.default import get_config
 from my_agent import evaluate_agent
@@ -72,12 +75,14 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         filepath = os.path.join(CROSS_FLOOR_DIR, filename)
         with open(filepath) as f:
             cross_ids = set(json.load(f))
-        # match against episode_id (str) or trajectory_id in info
+        # Also build string versions for matching
+        cross_ids_str = set(str(x) for x in cross_ids)
         before = len(dataset_split.episodes)
         dataset_split.episodes = [
             ep for ep in dataset_split.episodes
-            if str(ep.episode_id) in cross_ids
-            or str(ep.info.get("trajectory_id", "")) in cross_ids
+            if ep.episode_id in cross_ids
+            or str(ep.episode_id) in cross_ids_str
+            or str(ep.info.get("trajectory_id", "")) in cross_ids_str
         ]
         print(f"Cross-floor filter [{cross_floor_filter}]: {before} -> {len(dataset_split.episodes)} episodes")
 
