@@ -25,6 +25,8 @@ import networkx as nx
 import math
 import time
 import statistics
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def openai_api_calculate_cost(usage):
     model_pricing = {
@@ -34,7 +36,7 @@ def openai_api_calculate_cost(usage):
     }
 
     prompt_cost = usage.prompt_tokens * model_pricing['prompt'] / 1000
-    cached_cost = usage.prompt_tokens_details['cached_tokens'] * model_pricing['cached'] / 1000
+    cached_cost = getattr(usage.prompt_tokens_details, 'cached_tokens', 0) * model_pricing['cached'] / 1000
     completion_cost = usage.completion_tokens * model_pricing['completion'] / 1000
 
     total_cost = prompt_cost + completion_cost + cached_cost
@@ -131,8 +133,8 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
     env = Env(config.TASK_CONFIG, dataset)
     agent = MyGPTAgent(result_path)
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
-    EARLY_STOP_ROTATION = config.EVAL.EARLY_STOP_ROTATION
-    EARLY_STOP_STEPS = config.EVAL.EARLY_STOP_STEPS
+    EARLY_STOP_ROTATION = getattr(config.EVAL, "EARLY_STOP_ROTATION", False)
+    EARLY_STOP_STEPS = getattr(config.EVAL, "EARLY_STOP_STEPS", 20)
 
     target_key = {"distance_to_goal", "success", "spl", "path_length", "oracle_success"}
 
@@ -143,7 +145,7 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
     SCENE_GRAPHS_PATH = "VLN_CE/data/connectivity_graphs.pkl"
 
     for _ in trange(
-        num_episodes, desc=config.EVAL.IDENTIFICATION + "-{}".format(split_id)
+        num_episodes, desc=getattr(config.EVAL, "IDENTIFICATION", "test") + "-{}".format(split_id)
     ):
         obs = env.reset()
         iter_step = 0
@@ -411,9 +413,9 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
         cache_dict = {
             "scene_id": scene_id,
             "success": result_dict["success"],
-            "avg_time_per_iter": statistics.mean(time_per_iter),
+            "avg_time_per_iter": statistics.mean(time_per_iter) if time_per_iter else 0,
             "num_vlm_calls": who_acted_LOG.count("vlm"),
-            "avg_price_per_vlm_call": statistics.mean(agent.total_costs_of_calls),
+            "avg_price_per_vlm_call": statistics.mean(agent.total_costs_of_calls) if agent.total_costs_of_calls else 0,
             "num_total_calls": len(who_acted_LOG),
             "goal_waypoint": goal_waypoint,
             "cached_actions_LOG": cached_actions_LOG,
@@ -448,10 +450,8 @@ class MyGPTAgent(Agent):
         os.makedirs(os.path.join(self.result_path, "cache_log"), exist_ok=True)
 
         # Initialize OpenAI client
-        from dotenv import load_dotenv
-
-        load_dotenv()
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://models.sjtu.edu.cn/api/v1"))
+        print(f"DEBUG: client base_url={self.client.base_url}")
 
         # Initialize tracking variables
         self.rgb_list = []
@@ -480,6 +480,10 @@ class MyGPTAgent(Agent):
                 img = Image.fromarray(image_array, mode="RGB")
         else:
             img = Image.fromarray(image_array)
+
+        max_dim = 320
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
         img.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
