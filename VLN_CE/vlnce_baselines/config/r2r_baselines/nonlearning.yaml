@@ -2,7 +2,7 @@ BASE_TASK_CONFIG_PATH: VLN_CE/habitat_extensions/config/vlnce_task_zero_r2r.yaml
 EVAL:
     SPLIT: val_unseen
     # any num greater than the actual episode count evals every episode
-    EPISODE_COUNT: 1
+    EPISODE_COUNT: -1
     EVAL_NONLEARNING: True
     NONLEARNING:
         # RandomAgent or HandcraftedAgent
