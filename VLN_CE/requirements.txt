@@ -17,5 +17,6 @@ lmdb==1.7.3
 moviepy==1.0.3
 tb-nightly
 webdataset==0.1.40
-openai
+openai==1.28.1
+httpx<0.28
 python-dotenv
