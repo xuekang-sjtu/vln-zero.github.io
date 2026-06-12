@@ -113,7 +113,10 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             ssa_detector_model_source: str = "", opts=None) -> None:
     config = get_config(exp_config, opts)
     if ssa_guidance:
+        print(f"[SSA] enabled | checkpoint={ssa_checkpoint} | detect_threshold={ssa_detect_threshold}")
         config = enable_depth_sensor_for_ssa(config)
+    else:
+        print("[SSA] disabled")
     dataset = make_dataset(id_dataset=config.TASK_CONFIG.DATASET.TYPE, config=config.TASK_CONFIG.DATASET)
     dataset.episodes.sort(key=lambda ep: ep.episode_id)
     np.random.seed(42)

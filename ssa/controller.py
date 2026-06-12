@@ -66,6 +66,7 @@ class SSAController:
         self.plan: Optional[SSAPlan] = None
         self.last_proposal: Dict[str, Any] = {}
         self.last_error = ""
+        self._last_offer_print_key = ""
 
     def reset(self) -> None:
         self.used_this_episode = False
@@ -74,6 +75,7 @@ class SSAController:
         self.plan = None
         self.last_proposal = {}
         self.last_error = ""
+        self._last_offer_print_key = ""
 
     def current_status(self) -> SSAStatus:
         return SSAStatus(
@@ -142,6 +144,7 @@ class SSAController:
                     proposal["reason"] = "ok"
         self.last_proposal = proposal
         self.last_error = str(proposal.get("reason", ""))
+        self._maybe_print_offer_status(proposal)
         return proposal
 
     def maybe_start_takeover(self, *, delegate: bool, env) -> bool:
@@ -154,20 +157,24 @@ class SSAController:
             self.takeover_active = False
             self.pending_actions = []
             self.last_error = self.plan.error or "ssa_plan_empty"
+            print(f"[SSA] takeover rejected after approval | reason={self.last_error}")
             return False
         self.pending_actions = list(self.plan.actions)
         self.takeover_active = True
         self.last_error = ""
+        print(f"[SSA] takeover approved | planned_actions={len(self.pending_actions)}")
         return True
 
     def next_takeover_action(self, env) -> Optional[int]:
         if not self.takeover_active or self.plan is None:
             return None
         if self.planner.reached_target(env, self.plan.target_position, self.plan.target_yaw_deg):
+            print("[SSA] takeover reached target pose")
             self._finish_takeover()
             return None
         if not self.pending_actions:
             self.last_error = "ssa_takeover_exhausted_without_reaching_target"
+            print(f"[SSA] takeover failed | reason={self.last_error}")
             self._finish_takeover()
             return None
         return int(self.pending_actions.pop(0))
@@ -175,6 +182,7 @@ class SSAController:
     def notify_action_result(self, collision: bool) -> None:
         if self.takeover_active and collision:
             self.last_error = "ssa_collision_failure"
+            print(f"[SSA] takeover failed | reason={self.last_error}")
             self._finish_takeover()
 
     def prompt_status_text(self) -> str:
@@ -204,3 +212,13 @@ class SSAController:
         if float(estimate.get("distance_m", 1e9) or 1e9) > self.max_distance_m:
             return "target_too_far"
         return ""
+
+    def _maybe_print_offer_status(self, proposal: Dict[str, Any]) -> None:
+        key = f"{bool(proposal.get('available', False))}:{proposal.get('reason', '')}:{bool(self.used_this_episode)}"
+        if key == self._last_offer_print_key:
+            return
+        self._last_offer_print_key = key
+        if proposal.get("available", False):
+            print("[SSA] proposal available")
+        else:
+            print(f"[SSA] proposal unavailable | reason={proposal.get('reason', '')}")
