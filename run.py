@@ -6,10 +6,12 @@ os.environ["HABITAT_SIM_LOG"] = "quiet"
 import numpy as np
 import argparse
 import json
+from pathlib import Path
 from habitat.datasets import make_dataset
 from VLN_CE.vlnce_baselines.config.default import get_config
 from my_agent import evaluate_agent
 
+CWD = Path(__file__).resolve().parent
 CROSS_FLOOR_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "datasets", "cross_floor_episodes",
@@ -21,6 +23,26 @@ _FILTERS = {
     "rxr-100": "rxr_opennav100_guide_cross_floor.json",
     "rxr-all": "rxr_val_unseen_guide_cross_floor.json",
 }
+
+
+def enable_depth_sensor_for_ssa(config):
+    """SSA needs RGB-D while the zero-shot configs expose RGB only."""
+    config.defrost()
+    simulator = config.TASK_CONFIG.SIMULATOR
+    sensors = list(simulator.AGENT_0.SENSORS)
+    if "DEPTH_SENSOR" not in sensors:
+        sensors.append("DEPTH_SENSOR")
+        simulator.AGENT_0.SENSORS = sensors
+    depth_sensor = simulator.DEPTH_SENSOR
+    rgb_sensor = simulator.RGB_SENSOR
+    depth_sensor.WIDTH = int(getattr(rgb_sensor, "WIDTH", 640))
+    depth_sensor.HEIGHT = int(getattr(rgb_sensor, "HEIGHT", 480))
+    depth_sensor.HFOV = int(getattr(rgb_sensor, "HFOV", 90))
+    depth_sensor.TYPE = "HabitatSimDepthSensor"
+    if hasattr(rgb_sensor, "POSITION"):
+        depth_sensor.POSITION = list(rgb_sensor.POSITION)
+    config.freeze()
+    return config
 
 def main():
     parser = argparse.ArgumentParser()
@@ -58,13 +80,40 @@ def main():
         choices=["r2r-100", "r2r-all", "rxr-100", "rxr-all"],
         help="Only run cross-floor episodes",
     )
+    parser.add_argument(
+        "--ssa-guidance",
+        action="store_true",
+        help="Enable single-use SSA stair takeover.",
+    )
+    parser.add_argument(
+        "--ssa-checkpoint",
+        type=str,
+        default=str(CWD.parent / "SemanticSpatialAlignmentModule" / "outputs" / "20260604_121042" / "best_model.pt"),
+        help="Path to the trained SSA checkpoint.",
+    )
+    parser.add_argument(
+        "--ssa-detect-threshold",
+        type=float,
+        default=0.50,
+        help="Minimum stair detection confidence before SSA proposal.",
+    )
+    parser.add_argument(
+        "--ssa-detector-model-source",
+        type=str,
+        default="",
+        help="Optional local GroundingDINO model directory.",
+    )
     args = parser.parse_args()
     run_exp(**vars(args))
 
 
 def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
-            cross_floor_filter: str = None, opts=None) -> None:
+            cross_floor_filter: str = None, ssa_guidance: bool = False,
+            ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.50,
+            ssa_detector_model_source: str = "", opts=None) -> None:
     config = get_config(exp_config, opts)
+    if ssa_guidance:
+        config = enable_depth_sensor_for_ssa(config)
     dataset = make_dataset(id_dataset=config.TASK_CONFIG.DATASET.TYPE, config=config.TASK_CONFIG.DATASET)
     dataset.episodes.sort(key=lambda ep: ep.episode_id)
     np.random.seed(42)
@@ -86,7 +135,16 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ]
         print(f"Cross-floor filter [{cross_floor_filter}]: {before} -> {len(dataset_split.episodes)} episodes")
 
-    evaluate_agent(config, split_id, dataset_split, result_path)
+    evaluate_agent(
+        config,
+        split_id,
+        dataset_split,
+        result_path,
+        ssa_guidance=ssa_guidance,
+        ssa_checkpoint=ssa_checkpoint,
+        ssa_detect_threshold=ssa_detect_threshold,
+        ssa_detector_model_source=ssa_detector_model_source,
+    )
 
 
 

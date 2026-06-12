@@ -21,12 +21,17 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from openai import OpenAI
 import pickle
+from pathlib import Path
 import networkx as nx
 import math
 import time
 import statistics
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from ssa import SSAController
+
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def openai_api_calculate_cost(usage):
     model_pricing = {
@@ -126,12 +131,28 @@ def find_best_cached_jump(graph, start_node, goal_node):
                     
     return best_next_node
 
-def evaluate_agent(config, split_id, dataset, result_path) -> None:
+def evaluate_agent(
+    config,
+    split_id,
+    dataset,
+    result_path,
+    ssa_guidance=False,
+    ssa_checkpoint="",
+    ssa_detect_threshold=0.50,
+    ssa_detector_model_source="",
+) -> None:
     enable_use_of_cache = False
     enable_adding_to_cache = False # should be false if we do not have enable_use_of_cache
 
     env = Env(config.TASK_CONFIG, dataset)
-    agent = MyGPTAgent(result_path)
+    agent = MyGPTAgent(
+        result_path,
+        workspace_root=WORKSPACE_ROOT,
+        ssa_guidance=ssa_guidance,
+        ssa_checkpoint=ssa_checkpoint,
+        ssa_detect_threshold=ssa_detect_threshold,
+        ssa_detector_model_source=ssa_detector_model_source,
+    )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
     EARLY_STOP_ROTATION = getattr(config.EVAL, "EARLY_STOP_ROTATION", False)
     EARLY_STOP_STEPS = getattr(config.EVAL, "EARLY_STOP_STEPS", 20)
@@ -423,6 +444,7 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
             "did_cache_action_LOG": did_cache_action_LOG,
             "cached_locations_LOG": cached_locations_LOG,
             "vlm_price_LOG": agent.total_costs_of_calls,
+            "ssa_takeover_used": bool(getattr(agent.ssa_controller, "used_this_episode", False)) if getattr(agent, "ssa_controller", None) else False,
         }
 
         with open(os.path.join(os.path.join(result_path, "cache_log"),"stats_{}.json".format(env.current_episode.episode_id)), "w") as f:
@@ -436,11 +458,21 @@ def evaluate_agent(config, split_id, dataset, result_path) -> None:
 
 
 class MyGPTAgent(Agent):
-    def __init__(self, result_path, require_map=True):
+    def __init__(
+        self,
+        result_path,
+        require_map=True,
+        workspace_root=WORKSPACE_ROOT,
+        ssa_guidance=False,
+        ssa_checkpoint="",
+        ssa_detect_threshold=0.50,
+        ssa_detector_model_source="",
+    ):
         # print("Initialize MyGPTAgent")
 
         self.result_path = result_path
         self.require_map = require_map
+        self.workspace_root = workspace_root
 
         self.total_costs_of_calls = []
 
@@ -463,6 +495,13 @@ class MyGPTAgent(Agent):
         self.history = []
         self.history_window = 5
         self.last_action = None
+        self.ssa_controller = SSAController(
+            enabled=bool(ssa_guidance),
+            workspace_root=Path(self.workspace_root),
+            checkpoint_path=ssa_checkpoint,
+            detect_threshold=float(ssa_detect_threshold),
+            detector_model_source=ssa_detector_model_source or None,
+        )
 
         # print("Initialization Complete")
 
@@ -557,6 +596,16 @@ class MyGPTAgent(Agent):
             return next_step
         else:
             return ""
+
+    def parse_ssa_delegate(self, generated_text: str) -> bool:
+        match = re.search(
+            r"Delegate to SSA:\s*(yes|no|true|false)",
+            generated_text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return False
+        return match.group(1).strip().lower() in {"yes", "true"}
 
     def get_topdown_map_base64(self, info, rgb_shape):
         if "top_down_map_vlnce" in info:
@@ -737,6 +786,7 @@ class MyGPTAgent(Agent):
         self.count_id += 1
         self.pending_action_list = []
         self.total_costs_of_calls = []
+        self.ssa_controller.reset()
 
     def act(self, observations, info, episode_id, env, use_cached_action=False, cached_action=None, end_scene_on_cached_0=False):
         self.episode_id = episode_id
@@ -786,6 +836,32 @@ class MyGPTAgent(Agent):
                 if isinstance(collision_info, dict)
                 else False
             )  # returns T or F if in collision
+            self.ssa_controller.notify_action_result(bool(collision))
+
+            if self.ssa_controller.takeover_active:
+                takeover_action = self.ssa_controller.next_takeover_action(env)
+                if takeover_action is not None:
+                    self.previous_plan = "SSA stair takeover in progress."
+                    self.previous_output = (
+                        "Delegate to SSA: Yes\n"
+                        f"Action: {takeover_action}\n"
+                        "Next step: Continue SSA stair takeover."
+                    )
+                    if self.require_map:
+                        top_down_map = maps.colorize_draw_agent_and_fit_to_height(
+                            info["top_down_map_vlnce"], rgb.shape[0]
+                        )
+                        output_im = np.concatenate((rgb, top_down_map), axis=1)
+                        img = self.addtext(
+                            output_im,
+                            observations["instruction"]["text"],
+                            self.previous_output,
+                            current_direction,
+                            current_yaw,
+                        )
+                        self.topdown_map_list.append(img)
+                    self.last_action = takeover_action
+                    return {"action": takeover_action}
 
             self.history.append(
                 {
@@ -819,6 +895,13 @@ class MyGPTAgent(Agent):
 
             map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             image_data = self.encode_image(rgb)
+            ssa_proposal = self.ssa_controller.update_proposal(
+                instruction=instruction,
+                previous_output=self.previous_output or "",
+                previous_plan=self.previous_plan or "",
+                rgb=rgb,
+                depth=observations.get("depth"),
+            )
             # map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             user_text = (
                 f"Navigate to approach the red square on the top down map using the top-down map and camera view.\n\n"
@@ -837,6 +920,11 @@ class MyGPTAgent(Agent):
 
             if history_text:
                 user_text += "=== HISTORY CONTEXT ===\n" + history_text + "\n"
+
+            user_text += (
+                "=== SSA STAIR TAKEOVER ===\n"
+                f"SSA available: {'True' if ssa_proposal.get('available', False) else 'False'}\n"
+            )
 
             # Output options for actions
             user_text += (
@@ -883,7 +971,13 @@ class MyGPTAgent(Agent):
                         "- If Collision=True, treat it as a collision (forward failed) → reroute using a different action.\n"
                         "- If the last few actions are all turns (2 or 3) and orientation is nearly unchanged, you are looping → choose a different strategy (try forward or opposite turn).\n"
                         "- Use history and past path to avoid repeating the same failed action sequence.\n"
+                        "=== SSA STAIR TAKEOVER ===\n"
+                        "- SSA is a dedicated local stair approach/alignment controller.\n"
+                        "- If `SSA available: True` and you believe the current stair-related local phase should be delegated, output `Delegate to SSA: Yes`.\n"
+                        "- If you delegate to SSA, it will take over local navigation until it either reaches the stair target pose or fails. During takeover you do not control low-level actions.\n"
+                        "- If `SSA available: False`, output `Delegate to SSA: No`.\n"
                         "=== OUTPUT FORMAT ===\n"
+                        "Delegate to SSA: [Yes/No]\n"
                         "Action: [0-3]\n"
                         "Map reasoning: [Describe goal location relative to you in cardinal terms]\n"
                         "Camera reasoning: [Objects / obstacles seen in current view]\n"
@@ -926,6 +1020,27 @@ class MyGPTAgent(Agent):
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
+                    delegate_to_ssa = self.parse_ssa_delegate(generated_text)
+                    if self.ssa_controller.maybe_start_takeover(delegate=delegate_to_ssa, env=env):
+                        takeover_action = self.ssa_controller.next_takeover_action(env)
+                        if takeover_action is not None:
+                            self.previous_plan = "SSA stair takeover approved."
+                            self.previous_output = generated_text
+                            if self.require_map:
+                                top_down_map = maps.colorize_draw_agent_and_fit_to_height(
+                                    info["top_down_map_vlnce"], rgb.shape[0]
+                                )
+                                output_im = np.concatenate((rgb, top_down_map), axis=1)
+                                img = self.addtext(
+                                    output_im,
+                                    observations["instruction"]["text"],
+                                    self.previous_output,
+                                    current_direction,
+                                    current_yaw,
+                                )
+                                self.topdown_map_list.append(img)
+                            self.last_action = takeover_action
+                            return {"action": takeover_action}
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):
