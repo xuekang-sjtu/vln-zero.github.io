@@ -54,7 +54,11 @@ class SSAController:
         self.detector = None
         self.runtime = None
         if self.enabled:
-            self.detector = StaircaseDetector(detector_model_source)
+            self.detector = StaircaseDetector(
+                detector_model_source,
+                workspace_root=self.workspace_root,
+            )
+            print(f"[SSA] detector initialized | device={self.detector.device}")
             self.runtime = SSAPoseRuntime(
                 checkpoint_path,
                 workspace_root=self.workspace_root,

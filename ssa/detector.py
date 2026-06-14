@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -16,9 +17,16 @@ STAIR_LABELS = ("staircase", "stairs", "steps")
 class StaircaseDetector:
     """Detect stair-like regions with a minimal backend wrapper."""
 
-    def __init__(self, model_source: Optional[str] = None):
+    def __init__(
+        self,
+        model_source: Optional[str] = None,
+        *,
+        workspace_root: Optional[Path] = None,
+        device: Optional[str] = None,
+    ):
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.model_source = self._resolve_model_source(model_source)
-        self.device = self._resolve_device()
+        self.device = self._resolve_device(device)
         self.text_threshold = 0.20
         self._processor = None
         self._model = None
@@ -96,11 +104,17 @@ class StaircaseDetector:
         )
         results = post_processor(**kwargs)
         result = results[0] if results else {}
-        boxes = result.get("boxes") or []
-        scores = result.get("scores") or []
+        boxes = result.get("boxes")
+        if boxes is None:
+            boxes = []
+        scores = result.get("scores")
+        if scores is None:
+            scores = []
         text_labels = result.get("text_labels")
         if text_labels is None:
-            text_labels = result.get("labels") or []
+            text_labels = result.get("labels")
+        if text_labels is None:
+            text_labels = []
 
         detections: List[Dict[str, Any]] = []
         for box, score, label in list(zip(boxes, scores, text_labels))[: max(1, int(max_det))]:
@@ -118,12 +132,17 @@ class StaircaseDetector:
         return detections
 
     @staticmethod
-    def _resolve_device() -> str:
+    def _resolve_device(device: Optional[str] = None) -> str:
+        if device:
+            return str(device)
+        forced = str(__import__("os").environ.get("SSA_DETECTOR_DEVICE", "")).strip()
+        if forced:
+            return forced
         try:
             import torch
 
             if torch.cuda.is_available():
-                return "cuda:0"
+                return "cuda"
         except Exception:
             pass
         return "cpu"
@@ -160,34 +179,96 @@ class StaircaseDetector:
         if self._processor is not None and self._model is not None:
             return self._processor, self._model
 
-        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        from transformers import (
+            AutoConfig,
+            AutoModelForZeroShotObjectDetection,
+            AutoProcessor,
+        )
 
         processor = AutoProcessor.from_pretrained(
             self.model_source,
             local_files_only=True,
             use_fast=False,
         )
-        model = AutoModelForZeroShotObjectDetection.from_pretrained(
+        config = AutoConfig.from_pretrained(
             self.model_source,
             local_files_only=True,
         )
-        model.to(self.device)
+        # GroundingDINO in Transformers can optionally try to load custom CUDA
+        # deformable-attention kernels. We explicitly disable that path so SSA
+        # stays on the standard Transformers implementation and avoids noisy
+        # extension-load failures on machines without the compiled op.
+        if hasattr(config, "disable_custom_kernels"):
+            config.disable_custom_kernels = True
+        with self._disable_groundingdino_custom_kernel_probe():
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(
+                self.model_source,
+                local_files_only=True,
+                config=config,
+            )
+        try:
+            model.to(self.device)
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            model.to("cpu")
+            self.device = "cpu"
         model.eval()
         self._processor = processor
         self._model = model
         return processor, model
 
+    @staticmethod
+    @contextmanager
+    def _disable_groundingdino_custom_kernel_probe():
+        """Prevent Transformers GroundingDINO from probing CUDA custom ops.
+
+        Some Transformers versions try to JIT-build/load the deformable-attention
+        extension during model construction whenever CUDA and ninja are present,
+        before `config.disable_custom_kernels` is honored. We temporarily force
+        that availability check to fail so SSA stays on the pure-PyTorch path.
+        """
+        try:
+            import transformers.models.grounding_dino.modeling_grounding_dino as gdino_modeling
+        except Exception:
+            yield
+            return
+
+        original_is_torch_cuda_available = getattr(gdino_modeling, "is_torch_cuda_available", None)
+        original_is_ninja_available = getattr(gdino_modeling, "is_ninja_available", None)
+        try:
+            gdino_modeling.is_torch_cuda_available = lambda: False
+            gdino_modeling.is_ninja_available = lambda: False
+            yield
+        finally:
+            if original_is_torch_cuda_available is not None:
+                gdino_modeling.is_torch_cuda_available = original_is_torch_cuda_available
+            if original_is_ninja_available is not None:
+                gdino_modeling.is_ninja_available = original_is_ninja_available
+
     def _resolve_model_source(self, model_source: Optional[str]) -> str:
         if model_source:
             candidate = Path(model_source).expanduser()
+            if not candidate.is_absolute() and self.workspace_root is not None:
+                candidate = (self.workspace_root / candidate).resolve()
             if candidate.exists():
                 return str(candidate.resolve())
 
         search_roots = [
+            (self.workspace_root / "vln-zero.github.io" / "vln-lg" / "models" / "grounding-dino-base").resolve()
+            if self.workspace_root is not None else None,
+            (self.workspace_root / "vln-lg" / "models" / "grounding-dino-base").resolve()
+            if self.workspace_root is not None else None,
+            (self.workspace_root / "models" / "groundingdino" / "grounding-dino-base").resolve()
+            if self.workspace_root is not None else None,
+            (self.workspace_root / "models" / "grounding-dino-base").resolve()
+            if self.workspace_root is not None else None,
             Path(__file__).resolve().parents[3] / "vln-zero.github.io" / "vln-lg" / "models" / "grounding-dino-base",
             Path(__file__).resolve().parents[1] / "models" / "grounding-dino-base",
         ]
         for candidate in search_roots:
+            if candidate is None:
+                continue
             if candidate.exists():
                 return str(candidate.resolve())
         raise FileNotFoundError(

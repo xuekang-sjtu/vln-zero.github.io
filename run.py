@@ -25,6 +25,23 @@ _FILTERS = {
 }
 
 
+def collect_completed_episode_ids(result_path: str):
+    """Read completed episode ids from per-episode stats files."""
+    log_dir = Path(result_path) / "log"
+    if not log_dir.exists():
+        return set()
+
+    completed_ids = set()
+    for stats_file in log_dir.glob("stats_*.json"):
+        stem = stats_file.stem
+        if not stem.startswith("stats_"):
+            continue
+        episode_id = stem[len("stats_") :].strip()
+        if episode_id:
+            completed_ids.add(episode_id)
+    return completed_ids
+
+
 def enable_depth_sensor_for_ssa(config):
     """SSA needs RGB-D while the zero-shot configs expose RGB only."""
     config.defrost()
@@ -88,7 +105,7 @@ def main():
     parser.add_argument(
         "--ssa-checkpoint",
         type=str,
-        default=str(CWD.parent / "SemanticSpatialAlignmentModule" / "outputs" / "20260604_121042" / "best_model.pt"),
+        default="SemanticSpatialAlignmentModule/outputs/20260604_121042/best_model.pt",
         help="Path to the trained SSA checkpoint.",
     )
     parser.add_argument(
@@ -103,6 +120,11 @@ def main():
         default="",
         help="Optional local GroundingDINO model directory.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip episodes that already have per-episode result logs.",
+    )
     args = parser.parse_args()
     run_exp(**vars(args))
 
@@ -110,7 +132,8 @@ def main():
 def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             cross_floor_filter: str = None, ssa_guidance: bool = False,
             ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.50,
-            ssa_detector_model_source: str = "", opts=None) -> None:
+            ssa_detector_model_source: str = "", resume: bool = False,
+            opts=None) -> None:
     config = get_config(exp_config, opts)
     if ssa_guidance:
         print(f"[SSA] enabled | checkpoint={ssa_checkpoint} | detect_threshold={ssa_detect_threshold}")
@@ -137,6 +160,18 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             or str(ep.info.get("trajectory_id", "")) in cross_ids_str
         ]
         print(f"Cross-floor filter [{cross_floor_filter}]: {before} -> {len(dataset_split.episodes)} episodes")
+
+    if resume:
+        completed_ids = collect_completed_episode_ids(result_path)
+        before = len(dataset_split.episodes)
+        dataset_split.episodes = [
+            ep for ep in dataset_split.episodes
+            if str(ep.episode_id) not in completed_ids
+        ]
+        print(
+            f"Resume filter: {before} -> {len(dataset_split.episodes)} episodes "
+            f"(skipped {before - len(dataset_split.episodes)} completed from {Path(result_path) / 'log'})"
+        )
 
     evaluate_agent(
         config,
