@@ -27,6 +27,7 @@ import math
 import time
 import statistics
 import sys
+import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -42,7 +43,9 @@ def openai_api_calculate_cost(usage):
     }
 
     prompt_cost = usage.prompt_tokens * model_pricing['prompt'] / 1000
-    cached_cost = getattr(usage.prompt_tokens_details, 'cached_tokens', 0) * model_pricing['cached'] / 1000
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cached_tokens = getattr(prompt_details, "cached_tokens", 0) if prompt_details is not None else 0
+    cached_cost = cached_tokens * model_pricing['cached'] / 1000
     completion_cost = usage.completion_tokens * model_pricing['completion'] / 1000
 
     total_cost = prompt_cost + completion_cost + cached_cost
@@ -139,7 +142,7 @@ def evaluate_agent(
     result_path,
     ssa_guidance=False,
     ssa_checkpoint="",
-    ssa_detect_threshold=0.50,
+    ssa_detect_threshold=0.30,
     ssa_detector_model_source="",
 ) -> None:
     enable_use_of_cache = False
@@ -155,8 +158,8 @@ def evaluate_agent(
         ssa_detector_model_source=ssa_detector_model_source,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
-    EARLY_STOP_ROTATION = getattr(config.EVAL, "EARLY_STOP_ROTATION", False)
-    EARLY_STOP_STEPS = getattr(config.EVAL, "EARLY_STOP_STEPS", 20)
+    EARLY_STOP_ROTATION = int(getattr(config.EVAL, "EARLY_STOP_ROTATION", 0) or 0)
+    EARLY_STOP_STEPS = int(getattr(config.EVAL, "EARLY_STOP_STEPS", 100) or 0)
 
     target_key = {"distance_to_goal", "success", "spl", "path_length", "oracle_success"}
 
@@ -190,9 +193,13 @@ def evaluate_agent(
         who_acted_LOG = []
         did_cache_action_LOG = []
         cached_locations_LOG = []
+        cached_yaws_LOG = []
+        cached_directions_LOG = []
+        early_stop_reason_LOG = []
 
+        vlm_decision_count = 0
         continuse_rotation_count = 0
-        last_dtg = 999
+        last_dtg = None
 
         goal_pos = env.current_episode.goals[0].position
         goal_waypoint = find_nearest_waypoint_to(goal_pos, curr_sg)
@@ -236,11 +243,16 @@ def evaluate_agent(
             who_acted = "cache"
             cached_this_iter = False
 
-            if info["distance_to_goal"] != last_dtg:
+            previous_actor = who_acted_LOG[-1] if who_acted_LOG else None
+            if previous_actor == "vlm":
+                if last_dtg is None or info["distance_to_goal"] != last_dtg:
+                    continuse_rotation_count = 0
+                else:
+                    continuse_rotation_count += 1
                 last_dtg = info["distance_to_goal"]
+            elif previous_actor is not None:
                 continuse_rotation_count = 0
-            else:
-                continuse_rotation_count += 1
+                last_dtg = None
 
             if (enable_use_of_cache):
                 waypoint = find_nearest_waypoint_to(curr_pos, curr_sg, thresh=0.25)
@@ -364,12 +376,18 @@ def evaluate_agent(
             
             if ((not enable_use_of_cache) or (not cached_path_in_progress)): # pure VLM navigation
                 action = agent.act(obs, info, env.current_episode.episode_id, env)
-                who_acted = "vlm"
+                who_acted = getattr(agent, "last_action_source", "vlm")
+                if getattr(agent, "last_action_is_vlm_decision", False):
+                    vlm_decision_count += 1
 
-            if (
-                continuse_rotation_count > EARLY_STOP_ROTATION
-                or iter_step > EARLY_STOP_STEPS
-            ):
+            early_stop_reason = ""
+            if who_acted == "vlm":
+                if EARLY_STOP_ROTATION > 0 and continuse_rotation_count > EARLY_STOP_ROTATION:
+                    early_stop_reason = f"rotation_stall>{EARLY_STOP_ROTATION}"
+                elif EARLY_STOP_STEPS > 0 and vlm_decision_count > EARLY_STOP_STEPS:
+                    early_stop_reason = f"vlm_decision_limit>{EARLY_STOP_STEPS}"
+            if early_stop_reason:
+                print(f"[{episode_id} LOG] Early stop triggered: {early_stop_reason}")
                 action = {"action": 0}
 
             iter_step += 1
@@ -379,9 +397,13 @@ def evaluate_agent(
             # FOR LOGGING
             #cached_locations_LOG.append(info['top_down_map_vlnce']['agent_map_coord']) # 2D MAP COORDS
             cached_locations_LOG.append(env.sim.get_agent_state().position.tolist()) # 3D HABITAT COORDS
+            post_direction, post_yaw = agent.get_cardinal_direction(env.sim.get_agent_state().rotation)
+            cached_yaws_LOG.append(float(post_yaw))
+            cached_directions_LOG.append(str(post_direction))
             cached_actions_LOG.append(action['action'])
             who_acted_LOG.append(who_acted)
             did_cache_action_LOG.append(cached_this_iter)
+            early_stop_reason_LOG.append(early_stop_reason)
 
             if (cached_this_iter):
                 print(f"[{episode_id} LOG] Added cached path to (local) scene graph")
@@ -444,12 +466,20 @@ def evaluate_agent(
             "who_acted_LOG": who_acted_LOG,
             "did_cache_action_LOG": did_cache_action_LOG,
             "cached_locations_LOG": cached_locations_LOG,
+            "cached_yaws_LOG": cached_yaws_LOG,
+            "cached_directions_LOG": cached_directions_LOG,
+            "early_stop_reason_LOG": early_stop_reason_LOG,
             "vlm_price_LOG": agent.total_costs_of_calls,
             "ssa_takeover_used": bool(getattr(agent.ssa_controller, "used_this_episode", False)) if getattr(agent, "ssa_controller", None) else False,
+            "ssa_trace": agent.ssa_controller.episode_trace() if getattr(agent, "ssa_controller", None) else {},
         }
+
+        if getattr(agent, "ssa_controller", None):
+            print(f"[SSA] episode summary | episode={episode_id} {agent.ssa_controller.episode_summary_text()}")
 
         with open(os.path.join(os.path.join(result_path, "cache_log"),"stats_{}.json".format(env.current_episode.episode_id)), "w") as f:
             json.dump(cache_dict, f, indent=4)
+        agent.save_episode_gif()
 
         if (result_dict["success"]):
             print(f"[{episode_id} LOG] {scene_id}/{episode_id} complete, SUCCESS")
@@ -466,7 +496,7 @@ class MyGPTAgent(Agent):
         workspace_root=WORKSPACE_ROOT,
         ssa_guidance=False,
         ssa_checkpoint="",
-        ssa_detect_threshold=0.50,
+        ssa_detect_threshold=0.30,
         ssa_detector_model_source="",
     ):
         # print("Initialize MyGPTAgent")
@@ -607,6 +637,45 @@ class MyGPTAgent(Agent):
         if not match:
             return False
         return match.group(1).strip().lower() in {"yes", "true"}
+
+    def extract_llm_text(self, message) -> str:
+        """Support thinking-model responses where final content may be None."""
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(item, str):
+                    parts.append(item)
+            joined = "\n".join(part.strip() for part in parts if part and part.strip())
+            if joined:
+                return joined
+        for attr in ("reasoning_content", "reasoning", "thinking"):
+            value = getattr(message, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if hasattr(message, "model_dump"):
+            dumped = message.model_dump()
+            for key in ("content", "reasoning_content", "reasoning", "thinking"):
+                value = dumped.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def build_chat_extra_body(self, model: str) -> dict:
+        """Disable Qwen thinking by default; navigation only needs short actions."""
+        model_name = str(model or "").lower()
+        if "qwen" not in model_name:
+            return {}
+        enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "0").strip().lower()
+        if enable_thinking in {"1", "true", "yes", "on"}:
+            return {}
+        return {"chat_template_kwargs": {"enable_thinking": False}}
 
     def get_topdown_map_base64(self, info, rgb_shape):
         if "top_down_map_vlnce" in info:
@@ -772,12 +841,7 @@ class MyGPTAgent(Agent):
         return new_image
 
     def reset(self):
-        if self.require_map:
-            if len(self.topdown_map_list) != 0:
-                output_video_path = os.path.join(
-                    self.result_path, "video", "{}.gif".format(self.episode_id)
-                )
-                imageio.mimsave(output_video_path, self.topdown_map_list)
+        self.save_episode_gif()
 
         self.rgb_list = []
         self.topdown_map_list = []
@@ -788,10 +852,21 @@ class MyGPTAgent(Agent):
         self.pending_action_list = []
         self.total_costs_of_calls = []
         self.ssa_controller.reset()
+        self.last_action_source = "vlm"
+        self.last_action_is_vlm_decision = False
+
+    def save_episode_gif(self):
+        if not self.require_map or len(self.topdown_map_list) == 0:
+            return
+        output_video_path = os.path.join(
+            self.result_path, "video", "{}.gif".format(self.episode_id)
+        )
+        imageio.mimsave(output_video_path, self.topdown_map_list)
 
     def act(self, observations, info, episode_id, env, use_cached_action=False, cached_action=None, end_scene_on_cached_0=False):
         self.episode_id = episode_id
         self.step_count += 1
+        self.last_action_is_vlm_decision = False
         rgb = observations["rgb"]
         self.rgb_list.append(rgb)
         agent_state = env.sim.get_agent_state()
@@ -808,6 +883,7 @@ class MyGPTAgent(Agent):
             temp_action = self.pending_action_list.pop(
                 0
             )  # Run steps in queue before requerying gpt
+            self.last_action_source = "vlm"
 
             # if self.require_map:
             #     top_down_map = maps.colorize_draw_agent_and_fit_to_height(
@@ -837,7 +913,15 @@ class MyGPTAgent(Agent):
                 if isinstance(collision_info, dict)
                 else False
             )  # returns T or F if in collision
+            takeover_was_active = bool(self.ssa_controller.takeover_active)
             self.ssa_controller.notify_action_result(bool(collision))
+            if takeover_was_active and not self.ssa_controller.takeover_active and self.ssa_controller.last_error:
+                self.ssa_controller.record_takeover_result(
+                    step=self.step_count,
+                    success=False,
+                    reason=str(self.ssa_controller.last_error),
+                    env=env,
+                )
 
             if self.ssa_controller.takeover_active:
                 takeover_action = self.ssa_controller.next_takeover_action(env)
@@ -862,7 +946,15 @@ class MyGPTAgent(Agent):
                         )
                         self.topdown_map_list.append(img)
                     self.last_action = takeover_action
+                    self.last_action_source = "ssa"
                     return {"action": takeover_action}
+                if not self.ssa_controller.takeover_active:
+                    self.ssa_controller.record_takeover_result(
+                        step=self.step_count,
+                        success=not bool(self.ssa_controller.last_error),
+                        reason=str(self.ssa_controller.last_error or "reached_target"),
+                        env=env,
+                    )
 
             self.history.append(
                 {
@@ -902,6 +994,16 @@ class MyGPTAgent(Agent):
                 previous_plan=self.previous_plan or "",
                 rgb=rgb,
                 depth=observations.get("depth"),
+            )
+            self.ssa_controller.record_step_proposal(
+                step=self.step_count,
+                available=bool(ssa_proposal.get("available", False)),
+                reason=str(ssa_proposal.get("reason", "")),
+            )
+            print(
+                f"[SSA] step={self.step_count} episode={episode_id} "
+                f"available={bool(ssa_proposal.get('available', False))} "
+                f"reason={ssa_proposal.get('reason', '')}"
             )
             # map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             user_text = (
@@ -1008,21 +1110,52 @@ class MyGPTAgent(Agent):
             ]
             try:
                 if (use_cached_action == False):
-                    response = self.client.chat.completions.create(
-                        model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
-                        messages=messages,
-                        max_tokens=300,
-                        temperature=0.3,
-                    )
+                    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+                    model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+                    extra_body = self.build_chat_extra_body(model_name)
+                    print(f"[LLM] request max_tokens={max_tokens} model={model_name} extra_body={extra_body}")
+                    request_params = {
+                        "model": model_name,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": 0.3,
+                    }
+                    if extra_body:
+                        request_params["extra_body"] = extra_body
+                    response = self.client.chat.completions.create(**request_params)
 
                     print(response)
 
-                    generated_text = response.choices[0].message.content.strip()
+                    generated_text = self.extract_llm_text(response.choices[0].message)
+                    if not generated_text:
+                        generated_text = (
+                            "Delegate to SSA: No\n"
+                            "Action: 1\n"
+                            "Next step: Empty LLM response; continue cautiously."
+                        )
+                        print("[LLM] empty response content; using safe fallback action=1")
+                    self.last_action_is_vlm_decision = True
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
                     delegate_to_ssa = self.parse_ssa_delegate(generated_text)
-                    if self.ssa_controller.maybe_start_takeover(delegate=delegate_to_ssa, env=env):
+                    self.ssa_controller.record_delegate_decision(
+                        step=self.step_count,
+                        delegated=bool(delegate_to_ssa),
+                    )
+                    if delegate_to_ssa:
+                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes")
+                    else:
+                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=no")
+                    takeover_started = self.ssa_controller.maybe_start_takeover(delegate=delegate_to_ssa, env=env)
+                    if delegate_to_ssa:
+                        self.ssa_controller.record_plan_outcome(
+                            step=self.step_count,
+                            accepted=bool(takeover_started),
+                            reason=str(self.ssa_controller.last_error or ("planned" if takeover_started else "ssa_plan_empty")),
+                            planned_actions=len(getattr(self.ssa_controller.plan, "actions", []) or []),
+                        )
+                    if takeover_started:
                         takeover_action = self.ssa_controller.next_takeover_action(env)
                         if takeover_action is not None:
                             self.previous_plan = "SSA stair takeover approved."
@@ -1041,7 +1174,15 @@ class MyGPTAgent(Agent):
                                 )
                                 self.topdown_map_list.append(img)
                             self.last_action = takeover_action
+                            self.last_action_source = "ssa"
                             return {"action": takeover_action}
+                        if not self.ssa_controller.takeover_active:
+                            self.ssa_controller.record_takeover_result(
+                                step=self.step_count,
+                                success=not bool(self.ssa_controller.last_error),
+                                reason=str(self.ssa_controller.last_error or "reached_target"),
+                                env=env,
+                            )
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):
@@ -1083,16 +1224,21 @@ class MyGPTAgent(Agent):
                 # SINGLE-ACTION APPEND (more VLM calls, more accurate cache)
                 if (action_index in [0, 1, 2, 3]):
                     self.pending_action_list.append(action_index)
+                    self.last_action_source = "cache" if use_cached_action else "vlm"
+                    self.last_action_is_vlm_decision = not use_cached_action
 
             except Exception as e:
                 print(f"API Error: {e}")
+                traceback.print_exc()
                 self.pending_action_list.append(random.randint(1, 3))
+                self.last_action_source = "fallback"
         else:
             # self.pending_action_list.append(1)
             pass
 
         if len(self.pending_action_list) == 0:  # Start with a stop sig
             self.pending_action_list.append(0)
+            self.last_action_source = "fallback_empty"
 
         if self.require_map:
             top_down_map = maps.colorize_draw_agent_and_fit_to_height(

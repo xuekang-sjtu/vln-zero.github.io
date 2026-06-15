@@ -48,5 +48,3 @@ DATASET:
   SPLIT: val_unseen
   DATA_PATH: ../datasets/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}.json.gz
   SCENES_DIR: ../datasets/scene_datasets/
-
-

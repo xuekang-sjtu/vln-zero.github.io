@@ -6,12 +6,18 @@ os.environ["HABITAT_SIM_LOG"] = "quiet"
 import numpy as np
 import argparse
 import json
+import sys
 from pathlib import Path
 from habitat.datasets import make_dataset
 from VLN_CE.vlnce_baselines.config.default import get_config
 from my_agent import evaluate_agent
 
 CWD = Path(__file__).resolve().parent
+PROJECT_ROOT = CWD.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from shared.episode_filter import filter_episodes_by_id, parse_episode_ids
+
 CROSS_FLOOR_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "datasets", "cross_floor_episodes",
@@ -111,7 +117,7 @@ def main():
     parser.add_argument(
         "--ssa-detect-threshold",
         type=float,
-        default=0.50,
+        default=0.30,
         help="Minimum stair detection confidence before SSA proposal.",
     )
     parser.add_argument(
@@ -125,14 +131,21 @@ def main():
         action="store_true",
         help="Skip episodes that already have per-episode result logs.",
     )
+    parser.add_argument(
+        "--episode-id",
+        type=str,
+        default=None,
+        help="Comma-separated episode ids to evaluate, e.g. 1413,1370,1371.",
+    )
     args = parser.parse_args()
     run_exp(**vars(args))
 
 
 def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             cross_floor_filter: str = None, ssa_guidance: bool = False,
-            ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.50,
+            ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.30,
             ssa_detector_model_source: str = "", resume: bool = False,
+            episode_id: str = None,
             opts=None) -> None:
     config = get_config(exp_config, opts)
     if ssa_guidance:
@@ -160,6 +173,15 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             or str(ep.info.get("trajectory_id", "")) in cross_ids_str
         ]
         print(f"Cross-floor filter [{cross_floor_filter}]: {before} -> {len(dataset_split.episodes)} episodes")
+
+    requested_episode_ids = parse_episode_ids(episode_id)
+    if requested_episode_ids:
+        before = len(dataset_split.episodes)
+        dataset_split.episodes = filter_episodes_by_id(dataset_split.episodes, requested_episode_ids)
+        print(
+            f"Episode-id filter [{','.join(requested_episode_ids)}]: "
+            f"{before} -> {len(dataset_split.episodes)} episodes"
+        )
 
     if resume:
         completed_ids = collect_completed_episode_ids(result_path)
