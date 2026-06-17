@@ -31,6 +31,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from shared.eval_metrics import format_episode_metric
 from shared.ssa import SSAController
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -476,6 +477,7 @@ def evaluate_agent(
 
         if getattr(agent, "ssa_controller", None):
             print(f"[SSA] episode summary | episode={episode_id} {agent.ssa_controller.episode_summary_text()}")
+        print(format_episode_metric(episode_id, result_dict))
 
         with open(os.path.join(os.path.join(result_path, "cache_log"),"stats_{}.json".format(env.current_episode.episode_id)), "w") as f:
             json.dump(cache_dict, f, indent=4)
