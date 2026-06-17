@@ -128,9 +128,20 @@ def main():
         help="Optional local GroundingDINO model directory.",
     )
     parser.add_argument(
+        "--filter-behind",
+        action="store_true",
+        help="Reject SSA proposals where the predicted target is behind the agent (x_forward_m < 0).",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip episodes that already have per-episode result logs.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Override ENVIRONMENT.MAX_EPISODE_STEPS (default: from config yaml).",
     )
     parser.add_argument(
         "--episode-id",
@@ -145,10 +156,17 @@ def main():
 def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             cross_floor_filter: str = None, ssa_guidance: bool = False,
             ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.30,
-            ssa_detector_model_source: str = "", resume: bool = False,
-            episode_id: str = None,
+            ssa_detector_model_source: str = "", filter_behind: bool = False,
+            max_steps: int = None,
+            resume: bool = False, episode_id: str = None,
             opts=None) -> None:
     config = get_config(exp_config, opts)
+    if max_steps is not None:
+        config.defrost()
+        config.TASK_CONFIG.ENVIRONMENT.MAX_EPISODE_STEPS = int(max_steps)
+        config.TASK_CONFIG.TASK.TOP_DOWN_MAP_VLNCE.MAX_EPISODE_STEPS = int(max_steps)
+        config.freeze()
+        print(f"[CONFIG] MAX_EPISODE_STEPS overridden to {max_steps}")
     if ssa_guidance:
         print(f"[SSA] enabled | checkpoint={ssa_checkpoint} | detect_threshold={ssa_detect_threshold}")
         config = enable_depth_sensor_for_ssa(config)
@@ -205,6 +223,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ssa_checkpoint=ssa_checkpoint,
         ssa_detect_threshold=ssa_detect_threshold,
         ssa_detector_model_source=ssa_detector_model_source,
+        filter_behind=filter_behind,
     )
 
 
