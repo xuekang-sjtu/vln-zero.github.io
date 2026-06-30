@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.eval_metrics import format_episode_metric
 from shared.ssa import SSAController
+from shared.ssa.oracle import select_oracle_exit_for_episode
 from shared.ssa.trajectory import save_trajectory_debug
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -147,6 +148,7 @@ def evaluate_agent(
     ssa_detect_threshold=0.30,
     ssa_detector_model_source="",
     filter_behind=False,
+    oracle_exit_enable=False,
 ) -> None:
     enable_use_of_cache = False
     enable_adding_to_cache = False # should be false if we do not have enable_use_of_cache
@@ -160,6 +162,7 @@ def evaluate_agent(
         ssa_detect_threshold=ssa_detect_threshold,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
+        oracle_exit_enable=oracle_exit_enable,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
     EARLY_STOP_ROTATION = int(getattr(config.EVAL, "EARLY_STOP_ROTATION", 0) or 0)
@@ -395,15 +398,8 @@ def evaluate_agent(
                 action = {"action": 0}
 
             iter_step += 1
-            if action.get("action") == "SSA":
-                rollout_result = agent.consume_pending_ssa_rollout()
-                if rollout_result is None:
-                    raise RuntimeError("SSA rollout action returned without a pending rollout result.")
-                obs = rollout_result.get("observations")
-                info = rollout_result.get("info", env.get_metrics())
-            else:
-                obs = env.step(action)
-                info = env.get_metrics()
+            obs = env.step(action)
+            info = env.get_metrics()
             cached_temp_path.append(action)
             
             # FOR LOGGING
@@ -466,6 +462,9 @@ def evaluate_agent(
                 with open(SCENE_GRAPHS_PATH, 'wb') as f:
                     pickle.dump(scene_graphs, f)
 
+        ssa_trace_path = ""
+        if getattr(agent, "ssa_controller", None):
+            ssa_trace_path = agent.ssa_controller.save_episode_trace(result_path, episode_id)
         cache_dict = {
             "scene_id": scene_id,
             "success": result_dict["success"],
@@ -483,7 +482,8 @@ def evaluate_agent(
             "early_stop_reason_LOG": early_stop_reason_LOG,
             "vlm_price_LOG": agent.total_costs_of_calls,
             "ssa_takeover_used": bool(getattr(agent.ssa_controller, "used_this_episode", False)) if getattr(agent, "ssa_controller", None) else False,
-            "ssa_trace": agent.ssa_controller.episode_trace() if getattr(agent, "ssa_controller", None) else {},
+            "ssa_summary": agent.ssa_controller.episode_summary() if getattr(agent, "ssa_controller", None) else {},
+            "ssa_trace_path": ssa_trace_path,
         }
         if getattr(agent, "ssa_controller", None):
             ssa_trace = agent.ssa_controller.episode_trace()
@@ -547,6 +547,7 @@ class MyGPTAgent(Agent):
         ssa_detect_threshold=0.30,
         ssa_detector_model_source="",
         filter_behind=False,
+        oracle_exit_enable=False,
     ):
         # print("Initialize MyGPTAgent")
 
@@ -582,6 +583,7 @@ class MyGPTAgent(Agent):
             detect_threshold=float(ssa_detect_threshold),
             detector_model_source=ssa_detector_model_source or None,
             filter_behind=filter_behind,
+            oracle_exit_enabled=oracle_exit_enable,
         )
 
         # print("Initialization Complete")
@@ -607,6 +609,65 @@ class MyGPTAgent(Agent):
 
         img.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    def _ssa_infer(self, system_prompt: str, user_prompt: str) -> str:
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+        request_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "32")),
+            "temperature": 0,
+        }
+        extra_body = self.build_chat_extra_body(model_name)
+        if extra_body:
+            request_params["extra_body"] = extra_body
+        response = self.client.chat.completions.create(**request_params)
+        if getattr(response, "usage", None) is not None:
+            self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
+        return self.extract_llm_text(response.choices[0].message)
+
+    def _ssa_infer_with_images(self, system_prompt: str, user_prompt: str, images: dict) -> str:
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+        user_content = [{"type": "text", "text": user_prompt}]
+        for image_dict in (images or {}).values():
+            rgb = image_dict.get("rgb") if isinstance(image_dict, dict) else image_dict
+            image_url = self._ssa_image_data_url(rgb)
+            if image_url:
+                user_content.append({"type": "image_url", "image_url": {"url": image_url}})
+        request_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "32")),
+            "temperature": 0,
+        }
+        extra_body = self.build_chat_extra_body(model_name)
+        if extra_body:
+            request_params["extra_body"] = extra_body
+        response = self.client.chat.completions.create(**request_params)
+        if getattr(response, "usage", None) is not None:
+            self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
+        return self.extract_llm_text(response.choices[0].message)
+
+    def _ssa_image_data_url(self, rgb) -> str:
+        if rgb is None:
+            return ""
+        if isinstance(rgb, Image.Image):
+            arr = np.asarray(rgb.convert("RGB"))
+        else:
+            arr = np.asarray(rgb)
+        if arr.dtype != np.uint8 and arr.size and float(np.nanmax(arr)) <= 1.0:
+            arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        elif arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if arr.ndim == 3 and arr.shape[-1] > 3:
+            arr = arr[..., :3]
+        return f"data:image/png;base64,{self.encode_image(arr)}"
 
     def get_cardinal_direction(self, quaternion):
         """
@@ -902,7 +963,8 @@ class MyGPTAgent(Agent):
         self.pending_action_list = []
         self.total_costs_of_calls = []
         self.ssa_controller.reset()
-        self.pending_ssa_rollout_result = None
+        self.pending_ssa_prediction = None
+        self.pending_ssa_before_position = None
         self.last_action_source = "vlm"
         self.last_action_is_vlm_decision = False
         self._cached_instruction = None
@@ -915,10 +977,61 @@ class MyGPTAgent(Agent):
         )
         imageio.mimsave(output_video_path, self.topdown_map_list)
 
-    def consume_pending_ssa_rollout(self):
-        result = self.pending_ssa_rollout_result
-        self.pending_ssa_rollout_result = None
-        return result
+    def _ssa_current_position(self, env):
+        return [float(v) for v in env.sim.get_agent_state().position.tolist()]
+
+    @staticmethod
+    def _ssa_action_to_id(action_name):
+        return {"FORWARD": 1, "LEFT": 2, "RIGHT": 3}.get(str(action_name), 1)
+
+    def _ssa_record_previous_action_result(self, env, collision: bool):
+        if self.pending_ssa_prediction is None:
+            return
+        self.ssa_controller.record_action_result(
+            self.pending_ssa_prediction,
+            before_position=self.pending_ssa_before_position,
+            after_position=self._ssa_current_position(env),
+            collision=bool(collision),
+            done=False,
+        )
+        self.pending_ssa_prediction = None
+        self.pending_ssa_before_position = None
+
+    def _ssa_next_action(self, rgb, depth, env, instruction, info, current_direction, current_yaw):
+        prediction = self.ssa_controller.predict_step(
+            rgb=rgb,
+            depth=depth,
+            current_position=self._ssa_current_position(env),
+        )
+        if prediction.get("exit", False):
+            self.previous_plan = "SSA stair takeover finished."
+            self.previous_output = f"SSA takeover finished: {prediction.get('exit_reason', '')}"
+            return None
+
+        action_id = self._ssa_action_to_id(prediction.get("action", "FORWARD"))
+        self.pending_ssa_prediction = prediction
+        self.pending_ssa_before_position = self._ssa_current_position(env)
+        self.previous_plan = "SSA stair takeover in progress."
+        self.previous_output = (
+            f"SSA phase={prediction.get('phase', '')}; "
+            f"action={prediction.get('action', '')}"
+        )
+        if self.require_map:
+            top_down_map = maps.colorize_draw_agent_and_fit_to_height(
+                info["top_down_map_vlnce"], rgb.shape[0]
+            )
+            output_im = np.concatenate((rgb, top_down_map), axis=1)
+            img = self.addtext(
+                output_im,
+                instruction,
+                self.previous_output,
+                current_direction,
+                current_yaw,
+            )
+            self.topdown_map_list.append(img)
+        self.last_action = action_id
+        self.last_action_source = "ssa"
+        return {"action": action_id}
 
     def _get_instruction(self, observations, env):
         if self._cached_instruction is not None:
@@ -985,77 +1098,19 @@ class MyGPTAgent(Agent):
                 if isinstance(collision_info, dict)
                 else False
             )  # returns T or F if in collision
-            takeover_was_active = bool(self.ssa_controller.takeover_active)
-            self.ssa_controller.notify_action_result(bool(collision))
-            if takeover_was_active and not self.ssa_controller.takeover_active and self.ssa_controller.last_error:
-                self.ssa_controller.record_takeover_result(
-                    step=self.step_count,
-                    success=False,
-                    reason=str(self.ssa_controller.last_error),
-                    env=env,
-                )
-
+            self._ssa_record_previous_action_result(env, bool(collision))
             if self.ssa_controller.takeover_active:
-                takeover_rollout = self.ssa_controller.next_takeover_rollout(env)
-                if takeover_rollout is not None:
-                    self.previous_plan = "SSA stair takeover in progress."
-                    ssa_errors = self.ssa_controller.planner.pose_error(env, self.ssa_controller.plan.target_position, self.ssa_controller.plan.target_yaw_deg)
-                    self.previous_output = f"SSA takeover: pos {ssa_errors['position_error_m']:.2f}m, yaw {ssa_errors['yaw_error_deg']:.0f}°"
-                    self.pending_ssa_rollout_result = takeover_rollout
-                    if self.require_map:
-                        td_info = takeover_rollout.get("info", info)
-                        top_down_map = maps.colorize_draw_agent_and_fit_to_height(
-                            td_info["top_down_map_vlnce"], rgb.shape[0]
-                        )
-                        ssa_obs = takeover_rollout.get("observations", {}) or {}
-                        new_rgb = ssa_obs.get("rgb", rgb)
-                        output_im = np.concatenate((new_rgb, top_down_map), axis=1)
-                        img = self.addtext(
-                            output_im,
-                            instruction,
-                            self.previous_output,
-                            current_direction,
-                            current_yaw,
-                        )
-                        self.topdown_map_list.append(img)
-                    self.last_action = "SSA"
-                    self.last_action_source = "ssa"
-                    if not self.ssa_controller.takeover_active:
-                        self.ssa_controller.record_takeover_result(
-                            step=self.step_count,
-                            success=bool(takeover_rollout.get("success", False)),
-                            reason=str(self.ssa_controller.last_error or "reached_target"),
-                            env=env,
-                        )
-                    return {"action": "SSA"}
-                takeover_action = self.ssa_controller.next_takeover_action(env)
-                if takeover_action is not None:
-                    self.previous_plan = "SSA stair takeover in progress."
-                    ssa_errors = self.ssa_controller.planner.pose_error(env, self.ssa_controller.plan.target_position, self.ssa_controller.plan.target_yaw_deg)
-                    self.previous_output = f"SSA takeover: pos {ssa_errors['position_error_m']:.2f}m, yaw {ssa_errors['yaw_error_deg']:.0f}°"
-                    if self.require_map:
-                        top_down_map = maps.colorize_draw_agent_and_fit_to_height(
-                            info["top_down_map_vlnce"], rgb.shape[0]
-                        )
-                        output_im = np.concatenate((rgb, top_down_map), axis=1)
-                        img = self.addtext(
-                            output_im,
-                            instruction,
-                            self.previous_output,
-                            current_direction,
-                            current_yaw,
-                        )
-                        self.topdown_map_list.append(img)
-                    self.last_action = takeover_action
-                    self.last_action_source = "ssa"
-                    return {"action": takeover_action}
-                if not self.ssa_controller.takeover_active:
-                    self.ssa_controller.record_takeover_result(
-                        step=self.step_count,
-                        success=not bool(self.ssa_controller.last_error),
-                        reason=str(self.ssa_controller.last_error or "reached_target"),
-                        env=env,
-                    )
+                ssa_action = self._ssa_next_action(
+                    rgb,
+                    observations.get("depth"),
+                    env,
+                    instruction,
+                    info,
+                    current_direction,
+                    current_yaw,
+                )
+                if ssa_action is not None:
+                    return ssa_action
 
             self.history.append(
                 {
@@ -1176,12 +1231,11 @@ class MyGPTAgent(Agent):
                         "- If the last few actions are all turns (2 or 3) and orientation is nearly unchanged, you are looping → choose a different strategy (try forward or opposite turn).\n"
                         "- Use history and past path to avoid repeating the same failed action sequence.\n"
                         "=== SSA STAIR TAKEOVER ===\n"
-                        "- SSA is a dedicated local stair approach/alignment controller.\n"
-                        "- Do not decide whether the whole route needs stairs.\n"
-                        "- Do not delegate only because stairs are mentioned or visible.\n"
-                        "- If `SSA available: True`, output `Delegate to SSA: Yes` only when the current camera view shows you are at or just before a stair entrance and need local alignment/entry.\n"
-                        "- If you are already on stairs, currently going up/down stairs, past the entrance, or stairs are merely visible nearby, output `Delegate to SSA: No`.\n"
-                        "- If you delegate to SSA, it will take over local navigation until it either reaches the stair target pose or fails. During takeover you do not control low-level actions.\n"
+                        "- SSA is a dedicated local stair traversal controller.\n"
+                        "- Do not decide whether the whole route needs stairs only from the full instruction.\n"
+                        "- If `SSA available: True`, output `Delegate to SSA: Yes` when your current local next step is to approach, enter, traverse, go up, go down, or leave stairs.\n"
+                        "- Being already on stairs is not a reason to reject SSA if the current local task is still stair traversal.\n"
+                        "- If you delegate to SSA, it will take over local low-level actions and later return control.\n"
                         "- If `SSA available: False`, output `Delegate to SSA: No`.\n"
                         "=== OUTPUT FORMAT ===\n"
                         "Delegate to SSA: [Yes/No]\n"
@@ -1242,93 +1296,64 @@ class MyGPTAgent(Agent):
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
-                    delegate_to_ssa = self.parse_ssa_delegate(generated_text)
-                    self.ssa_controller.record_delegate_decision(
-                        step=self.step_count,
-                        delegated=bool(delegate_to_ssa),
-                        current_stage=self.previous_plan or "",
-                        history=history_text,
-                        prompt_has_rgb=True,
-                        raw_response=generated_text,
-                        reason=(
-                            "delegate_approved_at_stair_entrance"
-                            if delegate_to_ssa
-                            else "delegate_continue_at_stair"
+                    ssa_after_response = self.ssa_controller.update_proposal(
+                        instruction="",
+                        previous_output=generated_text,
+                        previous_plan=self.previous_plan or "",
+                        rgb=rgb,
+                        depth=observations.get("depth"),
+                        delegate_infer_fn=self._ssa_infer,
+                        delegate_image_infer_fn=self._ssa_infer_with_images,
+                        delegate_image={"rgb": rgb},
+                        delegate_current_stage=self.previous_plan or generated_text,
+                        delegate_history=history_text,
+                        delegate_observation_hint=(
+                            f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
                         ),
                     )
-                    if delegate_to_ssa:
-                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes")
-                    else:
-                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=no")
-                    takeover_started = self.ssa_controller.maybe_start_takeover(delegate=delegate_to_ssa, env=env)
-                    if delegate_to_ssa:
+                    if ssa_after_response.get("available", False):
+                        ssa_direction = str(ssa_after_response.get("direction", "unknown"))
+                        delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
+                        delegate_reason = "vlm_fallback" if ssa_after_response.get("reason") == "delegate_vlm" else "rule_and_dino_gate"
+                        self.ssa_controller.record_delegate_decision(
+                            step=self.step_count,
+                            delegated=True,
+                            current_stage=self.previous_plan or "",
+                            history=history_text,
+                            prompt_has_rgb=bool(delegate_info.get("prompt_has_rgb", False)),
+                            raw_response=str(delegate_info.get("raw_response", "") or generated_text),
+                            reason=delegate_reason,
+                            direction=ssa_direction,
+                        )
                         self.ssa_controller.record_plan_outcome(
                             step=self.step_count,
-                            accepted=bool(takeover_started),
-                            reason=str(self.ssa_controller.last_error or ("planned" if takeover_started else "ssa_plan_empty")),
-                            planned_actions=len(getattr(self.ssa_controller.plan, "actions", []) or []),
+                            accepted=True,
+                            reason="closed_loop_ready",
+                            planned_actions=0,
                         )
-                    if takeover_started:
-                        takeover_rollout = self.ssa_controller.next_takeover_rollout(env)
-                        if takeover_rollout is not None:
-                            self.previous_plan = "SSA stair takeover approved."
-                            ssa_errors = self.ssa_controller.planner.pose_error(env, self.ssa_controller.plan.target_position, self.ssa_controller.plan.target_yaw_deg)
-                            self.previous_output = f"SSA takeover: pos {ssa_errors['position_error_m']:.2f}m, yaw {ssa_errors['yaw_error_deg']:.0f}°"
-                            self.pending_ssa_rollout_result = takeover_rollout
-                            if self.require_map:
-                                td_info = takeover_rollout.get("info", info)
-                                top_down_map = maps.colorize_draw_agent_and_fit_to_height(
-                                    td_info["top_down_map_vlnce"], rgb.shape[0]
-                                )
-                                ssa_obs = takeover_rollout.get("observations", {}) or {}
-                                new_rgb = ssa_obs.get("rgb", rgb)
-                                output_im = np.concatenate((new_rgb, top_down_map), axis=1)
-                                img = self.addtext(
-                                    output_im,
-                                    instruction,
-                                    self.previous_output,
-                                    current_direction,
-                                    current_yaw,
-                                )
-                                self.topdown_map_list.append(img)
-                            self.last_action = "SSA"
-                            self.last_action_source = "ssa"
-                            if not self.ssa_controller.takeover_active:
-                                self.ssa_controller.record_takeover_result(
-                                    step=self.step_count,
-                                    success=bool(takeover_rollout.get("success", False)),
-                                    reason=str(self.ssa_controller.last_error or "reached_target"),
-                                    env=env,
-                                )
-                            return {"action": "SSA"}
-                        takeover_action = self.ssa_controller.next_takeover_action(env)
-                        if takeover_action is not None:
-                            self.previous_plan = "SSA stair takeover approved."
-                            ssa_errors = self.ssa_controller.planner.pose_error(env, self.ssa_controller.plan.target_position, self.ssa_controller.plan.target_yaw_deg)
-                            self.previous_output = f"SSA takeover: pos {ssa_errors['position_error_m']:.2f}m, yaw {ssa_errors['yaw_error_deg']:.0f}°"
-                            if self.require_map:
-                                top_down_map = maps.colorize_draw_agent_and_fit_to_height(
-                                    info["top_down_map_vlnce"], rgb.shape[0]
-                                )
-                                output_im = np.concatenate((rgb, top_down_map), axis=1)
-                                img = self.addtext(
-                                    output_im,
-                                    instruction,
-                                    self.previous_output,
-                                    current_direction,
-                                    current_yaw,
-                                )
-                                self.topdown_map_list.append(img)
-                            self.last_action = takeover_action
-                            self.last_action_source = "ssa"
-                            return {"action": takeover_action}
-                        if not self.ssa_controller.takeover_active:
-                            self.ssa_controller.record_takeover_result(
-                                step=self.step_count,
-                                success=not bool(self.ssa_controller.last_error),
-                                reason=str(self.ssa_controller.last_error or "reached_target"),
-                                env=env,
-                            )
+                        self.ssa_controller.start_takeover(
+                            direction=ssa_direction,
+                            step=self.step_count,
+                            rgb=rgb,
+                            depth=observations.get("depth"),
+                            oracle_exit=select_oracle_exit_for_episode(
+                                env.current_episode,
+                                current_position=self._ssa_current_position(env),
+                                direction=ssa_direction,
+                            ),
+                        )
+                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
+                        ssa_action = self._ssa_next_action(
+                            rgb,
+                            observations.get("depth"),
+                            env,
+                            instruction,
+                            info,
+                            current_direction,
+                            current_yaw,
+                        )
+                        if ssa_action is not None:
+                            return ssa_action
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):

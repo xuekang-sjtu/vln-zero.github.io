@@ -112,7 +112,7 @@ def main():
     parser.add_argument(
         "--ssa-checkpoint",
         type=str,
-        default="SemanticSpatialAlignmentModule/outputs/20260604_121042/best_model.pt",
+        default="",
         help="Path to the trained SSA checkpoint.",
     )
     parser.add_argument(
@@ -131,6 +131,11 @@ def main():
         "--filter-behind",
         action="store_true",
         help="Reject SSA proposals where the predicted target is behind the agent (x_forward_m < 0).",
+    )
+    parser.add_argument(
+        "--oracle-exit-enable",
+        action="store_true",
+        help="Use expert-path oracle exit as SSA diagnostic fallback.",
     )
     parser.add_argument(
         "--resume",
@@ -159,6 +164,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             ssa_detector_model_source: str = "", filter_behind: bool = False,
             max_steps: int = None,
             resume: bool = False, episode_id: str = None,
+            oracle_exit_enable: bool = False,
             opts=None) -> None:
     config = get_config(exp_config, opts)
     if max_steps is not None:
@@ -168,6 +174,8 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         config.freeze()
         print(f"[CONFIG] MAX_EPISODE_STEPS overridden to {max_steps}")
     if ssa_guidance:
+        if not str(ssa_checkpoint or "").strip():
+            raise ValueError("--ssa-guidance requires an explicit --ssa-checkpoint")
         print(f"[SSA] enabled | checkpoint={ssa_checkpoint} | detect_threshold={ssa_detect_threshold}")
         config = enable_depth_sensor_for_ssa(config)
     else:
@@ -224,6 +232,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ssa_detect_threshold=ssa_detect_threshold,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
+        oracle_exit_enable=oracle_exit_enable,
     )
 
 
