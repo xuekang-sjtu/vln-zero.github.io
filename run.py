@@ -5,7 +5,6 @@ os.environ["HABITAT_SIM_LOG"] = "quiet"
 
 import numpy as np
 import argparse
-import json
 import sys
 from pathlib import Path
 from habitat.datasets import make_dataset
@@ -16,37 +15,10 @@ CWD = Path(__file__).resolve().parent
 PROJECT_ROOT = CWD.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from shared.episode_filter import filter_episodes_by_id, parse_episode_ids
-
-CROSS_FLOOR_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "datasets", "cross_floor_episodes",
-)
-
-_FILTERS = {
-    "r2r-100": "r2r_v1-2_opennav100_cross_floor.json",
-    "r2r-100-0.5": "r2r_v1-2_opennav100_cross_floor_0.5m.json",
-    "r2r-all": "r2r_v1-3_cross_floor.json",
-    "rxr-100": "rxr_opennav100_guide_cross_floor.json",
-    "rxr-all": "rxr_val_unseen_guide_cross_floor.json",
-}
-
-
-def collect_completed_episode_ids(result_path: str):
-    """Read completed episode ids from per-episode stats files."""
-    log_dir = Path(result_path) / "log"
-    if not log_dir.exists():
-        return set()
-
-    completed_ids = set()
-    for stats_file in log_dir.glob("stats_*.json"):
-        stem = stats_file.stem
-        if not stem.startswith("stats_"):
-            continue
-        episode_id = stem[len("stats_") :].strip()
-        if episode_id:
-            completed_ids.add(episode_id)
-    return completed_ids
+from shared.cross_floor_filter import get_cross_floor_episode_ids
+from shared.episode_filter import parse_episode_ids
+from shared.evaluation_selection import filter_episode_objects
+from shared.resume_utils import collect_completed_episode_ids
 
 
 def enable_depth_sensor_for_ssa(config):
@@ -186,25 +158,20 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
     dataset_split = dataset.get_splits(split_num)[split_id]
 
     if cross_floor_filter is not None:
-        filename = _FILTERS[cross_floor_filter]
-        filepath = os.path.join(CROSS_FLOOR_DIR, filename)
-        with open(filepath) as f:
-            cross_ids = set(json.load(f))
-        # Also build string versions for matching
-        cross_ids_str = set(str(x) for x in cross_ids)
         before = len(dataset_split.episodes)
-        dataset_split.episodes = [
-            ep for ep in dataset_split.episodes
-            if ep.episode_id in cross_ids
-            or str(ep.episode_id) in cross_ids_str
-            or str(ep.info.get("trajectory_id", "")) in cross_ids_str
-        ]
+        dataset_split.episodes = filter_episode_objects(
+            dataset_split.episodes,
+            cross_floor_ids=get_cross_floor_episode_ids(cross_floor_filter),
+        )
         print(f"Cross-floor filter [{cross_floor_filter}]: {before} -> {len(dataset_split.episodes)} episodes")
 
     requested_episode_ids = parse_episode_ids(episode_id)
     if requested_episode_ids:
         before = len(dataset_split.episodes)
-        dataset_split.episodes = filter_episodes_by_id(dataset_split.episodes, requested_episode_ids)
+        dataset_split.episodes = filter_episode_objects(
+            dataset_split.episodes,
+            requested_ids=requested_episode_ids,
+        )
         print(
             f"Episode-id filter [{','.join(requested_episode_ids)}]: "
             f"{before} -> {len(dataset_split.episodes)} episodes"
@@ -213,10 +180,10 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
     if resume:
         completed_ids = collect_completed_episode_ids(result_path)
         before = len(dataset_split.episodes)
-        dataset_split.episodes = [
-            ep for ep in dataset_split.episodes
-            if str(ep.episode_id) not in completed_ids
-        ]
+        dataset_split.episodes = filter_episode_objects(
+            dataset_split.episodes,
+            completed_ids=completed_ids,
+        )
         print(
             f"Resume filter: {before} -> {len(dataset_split.episodes)} episodes "
             f"(skipped {before - len(dataset_split.episodes)} completed from {Path(result_path) / 'log'})"

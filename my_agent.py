@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.eval_metrics import format_episode_metric
+from shared.llm_adapter import build_chat_extra_body, extract_message_text
 from shared.ssa import SSAController
 from shared.ssa.oracle import select_oracle_exit_for_episode
 from shared.ssa.trajectory import save_trajectory_debug
@@ -564,7 +565,8 @@ class MyGPTAgent(Agent):
 
         # Initialize OpenAI client
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://models.sjtu.edu.cn/api/v1"))
-        print(f"DEBUG: client base_url={self.client.base_url}")
+        if os.getenv("VLN_ZERO_DEBUG_LLM_RESPONSE", "0") == "1":
+            print(f"DEBUG: client base_url={self.client.base_url}")
 
         # Initialize tracking variables
         self.rgb_list = []
@@ -750,43 +752,10 @@ class MyGPTAgent(Agent):
         return match.group(1).strip().lower() in {"yes", "true"}
 
     def extract_llm_text(self, message) -> str:
-        """Support thinking-model responses where final content may be None."""
-        content = getattr(message, "content", None)
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("content")
-                    if isinstance(text, str):
-                        parts.append(text)
-                elif isinstance(item, str):
-                    parts.append(item)
-            joined = "\n".join(part.strip() for part in parts if part and part.strip())
-            if joined:
-                return joined
-        for attr in ("reasoning_content", "reasoning", "thinking"):
-            value = getattr(message, attr, None)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        if hasattr(message, "model_dump"):
-            dumped = message.model_dump()
-            for key in ("content", "reasoning_content", "reasoning", "thinking"):
-                value = dumped.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return ""
+        return extract_message_text(message)
 
     def build_chat_extra_body(self, model: str) -> dict:
-        """Disable Qwen thinking by default; navigation only needs short actions."""
-        model_name = str(model or "").lower()
-        if "qwen" not in model_name:
-            return {}
-        enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "0").strip().lower()
-        if enable_thinking in {"1", "true", "yes", "on"}:
-            return {}
-        return {"chat_template_kwargs": {"enable_thinking": False}}
+        return build_chat_extra_body(model)
 
     def get_topdown_map_base64(self, info, rgb_shape):
         if "top_down_map_vlnce" in info:
@@ -1282,7 +1251,8 @@ class MyGPTAgent(Agent):
                         request_params["extra_body"] = extra_body
                     response = self.client.chat.completions.create(**request_params)
 
-                    print(response)
+                    if os.getenv("VLN_ZERO_DEBUG_LLM_RESPONSE", "0") == "1":
+                        print(response)
 
                     generated_text = self.extract_llm_text(response.choices[0].message)
                     if not generated_text:

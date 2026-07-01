@@ -28,6 +28,9 @@ import time
 import sys
 import statistics
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.llm_adapter import extract_message_text
+
 def openai_api_calculate_cost(usage):
     model_pricing = {
         'prompt': 0.002,
@@ -919,9 +922,8 @@ class MyGPTAgent(Agent):
                         temperature=0.3,
                     )
 
-                    print(response.choices[0].message.content)
-
-                    generated_text = response.choices[0].message.content.strip()
+                    generated_text = extract_message_text(response.choices[0].message)
+                    print(generated_text)
                     # self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
