@@ -972,6 +972,13 @@ class MyGPTAgent(Agent):
             depth=depth,
             current_position=self._ssa_current_position(env),
         )
+        if not prediction.get("ok", True):
+            reason = str(prediction.get("exit_reason") or prediction.get("error") or "prediction_failed")
+            if self.ssa_controller.takeover_active:
+                self.ssa_controller.finish_takeover(reason)
+            self.previous_plan = "SSA stair takeover unavailable."
+            self.previous_output = f"SSA takeover failed safely: {reason}"
+            return None
         if prediction.get("exit", False):
             self.previous_plan = "SSA stair takeover finished."
             self.previous_output = f"SSA takeover finished: {prediction.get('exit_reason', '')}"
@@ -1266,6 +1273,7 @@ class MyGPTAgent(Agent):
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
+                    llm_requested_ssa = self.parse_ssa_delegate(generated_text)
                     ssa_after_response = self.ssa_controller.update_proposal(
                         instruction="",
                         previous_output=generated_text,
@@ -1281,7 +1289,7 @@ class MyGPTAgent(Agent):
                             f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
                         ),
                     )
-                    if ssa_after_response.get("available", False):
+                    if ssa_after_response.get("available", False) and llm_requested_ssa:
                         ssa_direction = str(ssa_after_response.get("direction", "unknown"))
                         delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
                         delegate_reason = "vlm_fallback" if ssa_after_response.get("reason") == "delegate_vlm" else "rule_and_dino_gate"
@@ -1324,6 +1332,16 @@ class MyGPTAgent(Agent):
                         )
                         if ssa_action is not None:
                             return ssa_action
+                    elif ssa_after_response.get("available", False):
+                        self.ssa_controller.record_delegate_decision(
+                            step=self.step_count,
+                            delegated=False,
+                            current_stage=self.previous_plan or "",
+                            history=history_text,
+                            raw_response=generated_text,
+                            reason="llm_declined",
+                            direction=str(ssa_after_response.get("direction", "unknown")),
+                        )
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):
