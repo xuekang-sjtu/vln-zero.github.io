@@ -37,10 +37,10 @@ class GlobalGPSSensor(Sensor):
 
     def _get_observation_space(self, *args: Any, **kwargs: Any):
         return spaces.Box(
-            low=np.finfo(np.float).min,
-            high=np.finfo(np.float).max,
+            low=np.finfo(float).min,
+            high=np.finfo(float).max,
             shape=(self._dimensionality,),
-            dtype=np.float,
+            dtype=float,
         )
 
     def get_observation(self, *args: Any, **kwargs: Any):
@@ -69,7 +69,7 @@ class VLNOracleProgressSensor(Sensor):
         return SensorTypes.MEASUREMENT
 
     def _get_observation_space(self, *args: Any, **kwargs: Any) -> Space:
-        return spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float)
+        return spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=float)
 
     def get_observation(self, *args: Any, episode, **kwargs: Any) -> float:
         distance_to_target = self._sim.geodesic_distance(
@@ -115,7 +115,7 @@ class AngleFeaturesSensor(Sensor):
             low=-1.0,
             high=1.0,
             shape=(self.cameras, 4),
-            dtype=np.float,
+            dtype=float,
         )
 
     def get_observation(self, *args: Any, **kwargs: Any) -> ndarray:
@@ -144,7 +144,7 @@ class ShortestPathSensor(Sensor):
         return SensorTypes.TACTILE
 
     def _get_observation_space(self, *args: Any, **kwargs: Any):
-        return spaces.Box(low=0.0, high=100, shape=(1,), dtype=np.float)
+        return spaces.Box(low=0.0, high=100, shape=(1,), dtype=float)
 
     def get_observation(self, *args: Any, episode, **kwargs: Any):
         best_action = self.follower.get_next_action(episode.goals[0].position)
@@ -174,10 +174,10 @@ class RxRInstructionSensor(Sensor):
 
     def _get_observation_space(self, *args: Any, **kwargs: Any):
         return spaces.Box(
-            low=np.finfo(np.float).min,
-            high=np.finfo(np.float).max,
+            low=np.finfo(float).min,
+            high=np.finfo(float).max,
             shape=(512, 768),
-            dtype=np.float,
+            dtype=float,
         )
 
     def get_observation(

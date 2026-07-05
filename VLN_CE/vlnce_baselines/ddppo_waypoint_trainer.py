@@ -76,10 +76,10 @@ class DDPPOWaypointTrainer(PPOTrainer):
         )
 
         obs_space.spaces[instruction_uuid] = spaces.Box(
-            low=np.finfo(np.float).min,
-            high=np.finfo(np.float).max,
+            low=np.finfo(float).min,
+            high=np.finfo(float).max,
             shape=tuple(batch[instruction_uuid].shape[1:]),
-            dtype=np.float,
+            dtype=float,
         )
         obs_space = spaces.Dict(
             {
