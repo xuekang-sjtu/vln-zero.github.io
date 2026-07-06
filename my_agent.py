@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.eval_metrics import format_episode_metric
 from shared.llm_adapter import build_chat_extra_body, extract_message_text
-from shared.ssa import SSAController
+from shared.ssa import SSAController, adjust_habitat_episode_step_count
 from shared.ssa.oracle import select_oracle_exit_for_episode
 from shared.ssa.trajectory import save_trajectory_debug
 
@@ -172,6 +172,7 @@ def evaluate_agent(
     target_key = {"distance_to_goal", "success", "spl", "path_length", "oracle_success"}
 
     count = 0
+    evaluated_stats = {}
 
     # It is HIGHLY RECOMMENDED to create a backup or custom file for your scene graphs
     # and change the path here to that instead.
@@ -399,8 +400,13 @@ def evaluate_agent(
                 action = {"action": 0}
 
             iter_step += 1
-            obs = env.step(action)
-            info = env.get_metrics()
+            if isinstance(action, dict) and action.get("_ssa_takeover"):
+                obs = agent.last_ssa_takeover_observation
+                info = agent.last_ssa_takeover_info
+                action = {"action": action.get("action", 1)}
+            else:
+                obs = env.step(action)
+                info = env.get_metrics()
             cached_temp_path.append(action)
             
             # FOR LOGGING
@@ -524,7 +530,8 @@ def evaluate_agent(
 
         if getattr(agent, "ssa_controller", None):
             print(f"[SSA] episode summary | episode={episode_id} {agent.ssa_controller.episode_summary_text()}")
-        print(format_episode_metric(episode_id, result_dict))
+        evaluated_stats[episode_id] = result_dict
+        print(format_episode_metric(episode_id, result_dict, stats=evaluated_stats, total=num_episodes))
 
         with open(os.path.join(os.path.join(result_path, "cache_log"),"stats_{}.json".format(env.current_episode.episode_id)), "w") as f:
             json.dump(cache_dict, f, indent=4)
@@ -934,6 +941,9 @@ class MyGPTAgent(Agent):
         self.ssa_controller.reset()
         self.pending_ssa_prediction = None
         self.pending_ssa_before_position = None
+        self.last_ssa_takeover_observation = None
+        self.last_ssa_takeover_info = None
+        self.last_ssa_takeover_actions = []
         self.last_action_source = "vlm"
         self.last_action_is_vlm_decision = False
         self._cached_instruction = None
@@ -1009,6 +1019,98 @@ class MyGPTAgent(Agent):
         self.last_action_source = "ssa"
         return {"action": action_id}
 
+    def _ssa_render_trace_frame(self, rgb, info, instruction, output, current_direction, current_yaw):
+        if not self.require_map:
+            return
+        try:
+            top_down_map = maps.colorize_draw_agent_and_fit_to_height(
+                info["top_down_map_vlnce"], rgb.shape[0]
+            )
+            output_im = np.concatenate((rgb, top_down_map), axis=1)
+            self.topdown_map_list.append(
+                self.addtext(output_im, instruction, output, current_direction, current_yaw)
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _ssa_collision_from_info(info):
+        collision_info = info.get("collisions", 0) if isinstance(info, dict) else 0
+        if isinstance(collision_info, dict):
+            return bool(collision_info.get("is_collision", False))
+        return False
+
+    def _ssa_run_takeover(self, observations, info, env, instruction, current_direction, current_yaw):
+        current_obs = observations
+        current_info = info
+        actions = []
+
+        while self.ssa_controller.takeover_active:
+            rgb = current_obs["rgb"]
+            depth = current_obs.get("depth")
+            before = self._ssa_current_position(env)
+            prediction = self.ssa_controller.predict_step(
+                rgb=rgb,
+                depth=depth,
+                current_position=before,
+            )
+            if not prediction.get("ok", True):
+                reason = str(prediction.get("exit_reason") or prediction.get("error") or "prediction_failed")
+                if self.ssa_controller.takeover_active:
+                    self.ssa_controller.finish_takeover(reason)
+                self.previous_plan = "SSA stair takeover unavailable."
+                self.previous_output = f"SSA takeover failed safely: {reason}"
+                break
+            if prediction.get("exit", False):
+                self.previous_plan = "SSA stair takeover finished."
+                self.previous_output = f"SSA takeover finished: {prediction.get('exit_reason', '')}"
+                break
+
+            action_id = self._ssa_action_to_id(prediction.get("action", "FORWARD"))
+            output = (
+                f"SSA phase={prediction.get('phase', '')}; "
+                f"action={prediction.get('action', '')}"
+            )
+            self._ssa_render_trace_frame(
+                rgb,
+                current_info,
+                instruction,
+                output,
+                current_direction,
+                current_yaw,
+            )
+            current_obs = env.step({"action": action_id})
+            state = adjust_habitat_episode_step_count(env, -1)
+            current_info = env.get_metrics()
+            done = bool(state.get("episode_over", env.episode_over)) if state is not None else bool(env.episode_over)
+            post_reason = self.ssa_controller.record_action_result(
+                prediction,
+                before_position=before,
+                after_position=self._ssa_current_position(env),
+                collision=self._ssa_collision_from_info(current_info),
+                done=done,
+            )
+            actions.append(action_id)
+            if post_reason or done:
+                break
+
+        if actions:
+            adjust_habitat_episode_step_count(env, 1)
+            current_info = env.get_metrics()
+            self.last_ssa_takeover_observation = current_obs
+            self.last_ssa_takeover_info = current_info
+            self.last_ssa_takeover_actions = list(actions)
+            self.last_action = actions[-1]
+            self.last_action_source = "ssa"
+            self.previous_plan = self.previous_plan or "SSA stair takeover finished."
+            self.previous_output = self.previous_output or "SSA takeover completed."
+            return {"action": actions[-1], "_ssa_takeover": True}
+
+        self.last_ssa_takeover_observation = None
+        self.last_ssa_takeover_info = None
+        self.last_ssa_takeover_actions = []
+        return None
+
     def _get_instruction(self, observations, env):
         if self._cached_instruction is not None:
             return self._cached_instruction
@@ -1076,12 +1178,11 @@ class MyGPTAgent(Agent):
             )  # returns T or F if in collision
             self._ssa_record_previous_action_result(env, bool(collision))
             if self.ssa_controller.takeover_active:
-                ssa_action = self._ssa_next_action(
-                    rgb,
-                    observations.get("depth"),
+                ssa_action = self._ssa_run_takeover(
+                    observations,
+                    info,
                     env,
                     instruction,
-                    info,
                     current_direction,
                     current_yaw,
                 )
@@ -1321,12 +1422,11 @@ class MyGPTAgent(Agent):
                             ),
                         )
                         print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
-                        ssa_action = self._ssa_next_action(
-                            rgb,
-                            observations.get("depth"),
+                        ssa_action = self._ssa_run_takeover(
+                            observations,
+                            info,
                             env,
                             instruction,
-                            info,
                             current_direction,
                             current_yaw,
                         )
