@@ -642,7 +642,7 @@ class MyGPTAgent(Agent):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "32")),
+            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "128")),
             "temperature": 0,
         }
         extra_body = self.build_chat_extra_body(model_name)
@@ -667,7 +667,7 @@ class MyGPTAgent(Agent):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "32")),
+            "max_tokens": int(os.getenv("SSA_DELEGATE_MAX_TOKENS", "128")),
             "temperature": 0,
         }
         extra_body = self.build_chat_extra_body(model_name)
