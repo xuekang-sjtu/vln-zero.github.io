@@ -149,6 +149,7 @@ def evaluate_agent(
     ssa_detect_threshold=0.30,
     ssa_detector_model_source="",
     filter_behind=False,
+    ssa_max_takeovers_per_episode=1,
     oracle_exit_enable=False,
 ) -> None:
     enable_use_of_cache = False
@@ -163,6 +164,7 @@ def evaluate_agent(
         ssa_detect_threshold=ssa_detect_threshold,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
+        ssa_max_takeovers_per_episode=ssa_max_takeovers_per_episode,
         oracle_exit_enable=oracle_exit_enable,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
@@ -472,8 +474,19 @@ def evaluate_agent(
         ssa_trace_path = ""
         if getattr(agent, "ssa_controller", None):
             ssa_trace_path = agent.ssa_controller.save_episode_trace(result_path, episode_id)
+            result_dict["ssa_summary"] = agent.ssa_controller.episode_summary()
+            result_dict["ssa_trace_path"] = ssa_trace_path
+            with open(
+                os.path.join(
+                    os.path.join(result_path, "log"),
+                    "stats_{}.json".format(env.current_episode.episode_id),
+                ),
+                "w",
+            ) as f:
+                json.dump(result_dict, f, indent=4)
         cache_dict = {
             "scene_id": scene_id,
+            **{key: value for key, value in result_dict.items() if key != "id"},
             "success": result_dict["success"],
             "avg_time_per_iter": statistics.mean(time_per_iter) if time_per_iter else 0,
             "num_vlm_calls": who_acted_LOG.count("vlm"),
@@ -489,7 +502,7 @@ def evaluate_agent(
             "early_stop_reason_LOG": early_stop_reason_LOG,
             "vlm_price_LOG": agent.total_costs_of_calls,
             "ssa_takeover_used": bool(getattr(agent.ssa_controller, "used_this_episode", False)) if getattr(agent, "ssa_controller", None) else False,
-            "ssa_summary": agent.ssa_controller.episode_summary() if getattr(agent, "ssa_controller", None) else {},
+            "ssa_summary": result_dict.get("ssa_summary", {}),
             "ssa_trace_path": ssa_trace_path,
         }
         if getattr(agent, "ssa_controller", None):
@@ -555,6 +568,7 @@ class MyGPTAgent(Agent):
         ssa_detect_threshold=0.30,
         ssa_detector_model_source="",
         filter_behind=False,
+        ssa_max_takeovers_per_episode=1,
         oracle_exit_enable=False,
     ):
         # print("Initialize MyGPTAgent")
@@ -593,6 +607,7 @@ class MyGPTAgent(Agent):
             detector_model_source=ssa_detector_model_source or None,
             filter_behind=filter_behind,
             oracle_exit_enabled=oracle_exit_enable,
+            max_takeovers_per_episode=int(ssa_max_takeovers_per_episode),
         )
 
         # print("Initialization Complete")
@@ -1227,12 +1242,36 @@ class MyGPTAgent(Agent):
                 previous_plan=self.previous_plan or "",
                 rgb=rgb,
                 depth=observations.get("depth"),
+                delegate_infer_fn=self._ssa_infer,
+                delegate_image_infer_fn=self._ssa_infer_with_images,
+                delegate_image={"rgb": rgb},
+                delegate_current_stage=self.previous_plan or self.previous_output or instruction,
+                delegate_history=history_text,
+                delegate_observation_hint=(
+                    f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
+                ),
             )
             self.ssa_controller.record_step_proposal(
                 step=self.step_count,
                 available=bool(ssa_proposal.get("available", False)),
                 reason=str(ssa_proposal.get("reason", "")),
             )
+            initial_delegate_info = (
+                ssa_proposal.get("delegate", {})
+                if isinstance(ssa_proposal.get("delegate"), dict)
+                else {}
+            )
+            if initial_delegate_info and not ssa_proposal.get("available", False):
+                self.ssa_controller.record_delegate_decision(
+                    step=self.step_count,
+                    delegated=False,
+                    current_stage=self.previous_plan or self.previous_output or "",
+                    history=history_text,
+                    prompt_has_rgb=bool(initial_delegate_info.get("prompt_has_rgb", False)),
+                    raw_response=str(initial_delegate_info.get("raw_response", "")),
+                    reason=str(initial_delegate_info.get("decision_reason", ssa_proposal.get("reason", ""))),
+                    direction=str(initial_delegate_info.get("direction", "unknown")),
+                )
             print(
                 f"[SSA] step={self.step_count} episode={episode_id} "
                 f"available={bool(ssa_proposal.get('available', False))} "
@@ -1393,7 +1432,7 @@ class MyGPTAgent(Agent):
                     if ssa_after_response.get("available", False) and llm_requested_ssa:
                         ssa_direction = str(ssa_after_response.get("direction", "unknown"))
                         delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
-                        delegate_reason = "vlm_fallback" if ssa_after_response.get("reason") == "delegate_vlm" else "rule_and_dino_gate"
+                        delegate_reason = str(delegate_info.get("decision_reason", "vlm_gate"))
                         self.ssa_controller.record_delegate_decision(
                             step=self.step_count,
                             delegated=True,

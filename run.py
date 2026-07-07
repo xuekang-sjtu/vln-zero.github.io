@@ -94,6 +94,12 @@ def main():
         help="Minimum stair detection confidence before SSA proposal.",
     )
     parser.add_argument(
+        "--ssa-max-takeovers-per-episode",
+        type=int,
+        default=1,
+        help="Maximum SSA takeovers per episode; use -1 for no limit.",
+    )
+    parser.add_argument(
         "--ssa-detector-model-source",
         type=str,
         default="",
@@ -134,6 +140,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             cross_floor_filter: str = None, ssa_guidance: bool = False,
             ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.30,
             ssa_detector_model_source: str = "", filter_behind: bool = False,
+            ssa_max_takeovers_per_episode: int = 1,
             max_steps: int = None,
             resume: bool = False, episode_id: str = None,
             oracle_exit_enable: bool = False,
@@ -199,6 +206,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ssa_detect_threshold=ssa_detect_threshold,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
+        ssa_max_takeovers_per_episode=ssa_max_takeovers_per_episode,
         oracle_exit_enable=oracle_exit_enable,
     )
 
