@@ -1236,47 +1236,50 @@ class MyGPTAgent(Agent):
 
             map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             image_data = self.encode_image(rgb)
-            ssa_proposal = self.ssa_controller.update_proposal(
-                instruction=instruction,
-                previous_output=self.previous_output or "",
-                previous_plan=self.previous_plan or "",
-                rgb=rgb,
-                depth=observations.get("depth"),
-                delegate_infer_fn=self._ssa_infer,
-                delegate_image_infer_fn=self._ssa_infer_with_images,
-                delegate_image={"rgb": rgb},
-                delegate_current_stage=self.previous_plan or self.previous_output or instruction,
-                delegate_history=history_text,
-                delegate_observation_hint=(
-                    f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
-                ),
-            )
-            self.ssa_controller.record_step_proposal(
-                step=self.step_count,
-                available=bool(ssa_proposal.get("available", False)),
-                reason=str(ssa_proposal.get("reason", "")),
-            )
-            initial_delegate_info = (
-                ssa_proposal.get("delegate", {})
-                if isinstance(ssa_proposal.get("delegate"), dict)
-                else {}
-            )
-            if initial_delegate_info and not ssa_proposal.get("available", False):
-                self.ssa_controller.record_delegate_decision(
-                    step=self.step_count,
-                    delegated=False,
-                    current_stage=self.previous_plan or self.previous_output or "",
-                    history=history_text,
-                    prompt_has_rgb=bool(initial_delegate_info.get("prompt_has_rgb", False)),
-                    raw_response=str(initial_delegate_info.get("raw_response", "")),
-                    reason=str(initial_delegate_info.get("decision_reason", ssa_proposal.get("reason", ""))),
-                    direction=str(initial_delegate_info.get("direction", "unknown")),
+            ssa_enabled = bool(getattr(self.ssa_controller, "enabled", False))
+            ssa_proposal = {"available": False, "reason": "disabled"}
+            if ssa_enabled:
+                ssa_proposal = self.ssa_controller.update_proposal(
+                    instruction=instruction,
+                    previous_output=self.previous_output or "",
+                    previous_plan=self.previous_plan or "",
+                    rgb=rgb,
+                    depth=observations.get("depth"),
+                    delegate_infer_fn=self._ssa_infer,
+                    delegate_image_infer_fn=self._ssa_infer_with_images,
+                    delegate_image={"rgb": rgb},
+                    delegate_current_stage=self.previous_plan or self.previous_output or instruction,
+                    delegate_history=history_text,
+                    delegate_observation_hint=(
+                        f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
+                    ),
                 )
-            print(
-                f"[SSA] step={self.step_count} episode={episode_id} "
-                f"available={bool(ssa_proposal.get('available', False))} "
-                f"reason={ssa_proposal.get('reason', '')}"
-            )
+                self.ssa_controller.record_step_proposal(
+                    step=self.step_count,
+                    available=bool(ssa_proposal.get("available", False)),
+                    reason=str(ssa_proposal.get("reason", "")),
+                )
+                initial_delegate_info = (
+                    ssa_proposal.get("delegate", {})
+                    if isinstance(ssa_proposal.get("delegate"), dict)
+                    else {}
+                )
+                if initial_delegate_info and not ssa_proposal.get("available", False):
+                    self.ssa_controller.record_delegate_decision(
+                        step=self.step_count,
+                        delegated=False,
+                        current_stage=self.previous_plan or self.previous_output or "",
+                        history=history_text,
+                        prompt_has_rgb=bool(initial_delegate_info.get("prompt_has_rgb", False)),
+                        raw_response=str(initial_delegate_info.get("raw_response", "")),
+                        reason=str(initial_delegate_info.get("decision_reason", ssa_proposal.get("reason", ""))),
+                        direction=str(initial_delegate_info.get("direction", "unknown")),
+                    )
+                print(
+                    f"[SSA] step={self.step_count} episode={episode_id} "
+                    f"available={bool(ssa_proposal.get('available', False))} "
+                    f"reason={ssa_proposal.get('reason', '')}"
+                )
             # map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             user_text = (
                 f"Navigate to approach the red square on the top down map using the top-down map and camera view.\n\n"
@@ -1296,10 +1299,11 @@ class MyGPTAgent(Agent):
             if history_text:
                 user_text += "=== HISTORY CONTEXT ===\n" + history_text + "\n"
 
-            user_text += (
-                "=== SSA STAIR TAKEOVER ===\n"
-                f"SSA available: {'True' if ssa_proposal.get('available', False) else 'False'}\n"
-            )
+            if ssa_enabled:
+                user_text += (
+                    "=== SSA STAIR TAKEOVER ===\n"
+                    f"SSA available: {'True' if ssa_proposal.get('available', False) else 'False'}\n"
+                )
 
             # Output options for actions
             user_text += (
@@ -1311,56 +1315,62 @@ class MyGPTAgent(Agent):
                 f"Analyze the image and plan your next move using **global cardinal directions**."
             )
 
+            system_text = (
+                "You are an AI navigation agent inside a simulated environment. "
+                "Your job is to move from your START location to a GOAL location using your top-down map and camera view.\n\n"
+                "=== MAP LEGEND ===\n"
+                "- BLUE SQUARE: Your starting position.\n"
+                "- BLUE ARROW: Your current position & facing direction.\n"
+                "- BLUE LINE: Your path so far.\n"
+                "- RED SQUARE: The goal location you must reach.\n"
+                "- GRAY AREAS: Navigable floor where you can walk.\n"
+                "- WHITE AREAS: Obstacles or walls you cannot walk through.\n\n"
+                "=== NAVIGATION PRINCIPLES ===\n"
+                "1. Always identify the RED SQUARE (goal) on the map.\n"
+                "2. Compare your CURRENT CARDINAL DIRECTION (N, NE, E, SE, S, SW, W, NW) with the DIRECTION from your location to the goal.\n"
+                "3. If not facing toward the goal, turn left (2) or right (3) to align your heading.\n"
+                "4. Move forward (1) only when facing an open navigable path toward the goal using the FRONT VIEW CAMERA.\n"
+                "5. Avoid white (non-navigable) areas — if blocked, reorient using the map.\n"
+                "6. Stop (0) when you reach the goal on the top-down map (ONLY when blue arrow is touching or on top of red square).\n\n"
+                "7. Use distance-to-goal as feedback: if it's close to zero, you are near the goal, and you should Stop(0).\n"
+                "If it increases or stays constant for several steps, adjust strategy.\n\n"
+
+                "=== DECISION RULES ===\n"
+                "- Use top-down map to determine direction to move in.\n"
+                "- Every step, make a micro-plan: identify goal direction, check navigability, choose turn/move.\n"
+                "- If goal is to your left/right on the map, rotate toward it before moving.\n"
+                "- Use global cardinal directions for reasoning, NOT relative left/right from the camera.\n\n"
+                "=== HISTORY INTERPRETATION RULES ==="
+                "- If Collision=True, treat it as a collision (forward failed) → reroute using a different action.\n"
+                "- If the last few actions are all turns (2 or 3) and orientation is nearly unchanged, you are looping → choose a different strategy (try forward or opposite turn).\n"
+                "- Use history and past path to avoid repeating the same failed action sequence.\n"
+            )
+            if ssa_enabled:
+                system_text += (
+                    "=== SSA STAIR TAKEOVER ===\n"
+                    "- SSA is a dedicated local stair traversal controller.\n"
+                    "- Do not decide whether the whole route needs stairs only from the full instruction.\n"
+                    "- If `SSA available: True`, output `Delegate to SSA: Yes` when your current local next step is to approach, enter, traverse, go up, go down, or leave stairs.\n"
+                    "- Being already on stairs is not a reason to reject SSA if the current local task is still stair traversal.\n"
+                    "- If you delegate to SSA, it will take over local low-level actions and later return control.\n"
+                    "- If `SSA available: False`, output `Delegate to SSA: No`.\n"
+                    "=== OUTPUT FORMAT ===\n"
+                    "Delegate to SSA: [Yes/No]\n"
+                )
+            else:
+                system_text += "=== OUTPUT FORMAT ===\n"
+            system_text += (
+                "Action: [0-3]\n"
+                "Map reasoning: [Describe goal location relative to you in cardinal terms]\n"
+                "Camera reasoning: [Objects / obstacles seen in current view]\n"
+                "Navigation reasoning: [Step-by-step plan using map + camera]\n"
+                "Next step: [Brief plan for next move]"
+            )
+
             messages = [  # System prompt for navigation
                 {
                     "role": "system",
-                    "content": (
-                        "You are an AI navigation agent inside a simulated environment. "
-                        "Your job is to move from your START location to a GOAL location using your top-down map and camera view.\n\n"
-                        "=== MAP LEGEND ===\n"
-                        "- BLUE SQUARE: Your starting position.\n"
-                        "- BLUE ARROW: Your current position & facing direction.\n"
-                        "- BLUE LINE: Your path so far.\n"
-                        "- RED SQUARE: The goal location you must reach.\n"
-                        "- GRAY AREAS: Navigable floor where you can walk.\n"
-                        "- WHITE AREAS: Obstacles or walls you cannot walk through.\n\n"
-                        "=== NAVIGATION PRINCIPLES ===\n"
-                        "1. Always identify the RED SQUARE (goal) on the map.\n"
-                        "2. Compare your CURRENT CARDINAL DIRECTION (N, NE, E, SE, S, SW, W, NW) with the DIRECTION from your location to the goal.\n"
-                        "3. If not facing toward the goal, turn left (2) or right (3) to align your heading.\n"
-                        "4. Move forward (1) only when facing an open navigable path toward the goal using the FRONT VIEW CAMERA.\n"
-                        "5. Avoid white (non-navigable) areas — if blocked, reorient using the map.\n"
-                        "6. Stop (0) when you reach the goal on the top-down map (ONLY when blue arrow is touching or on top of red square).\n\n"
-                        "7. Use distance-to-goal as feedback: if it's close to zero, you are near the goal, and you should Stop(0).\n"
-                        "If it increases or stays constant for several steps, adjust strategy.\n\n"
-
-                        "=== DECISION RULES ===\n"
-                        "- Use top-down map to determine direction to move in.\n"
-                        "- Every step, make a micro-plan: identify goal direction, check navigability, choose turn/move.\n"
-                        "- If goal is to your left/right on the map, rotate toward it before moving.\n"
-                        "- Use global cardinal directions for reasoning, NOT relative left/right from the camera.\n\n"
-                        # "=== INSTRUCTION HANDLING PRINCIPLES ==="
-                        # "- Align map reasoning with the goal (if the instruction says 'enter the room on the left,' prioritize detecting a doorway on the left side of the map/camera).\n"
-                        # "- If the map doesn’t directly show the described feature (e.g., 'hallway'), rely on camera view and relative navigation until a landmark matches.\n"
-                        "=== HISTORY INTERPRETATION RULES ==="
-                        "- If Collision=True, treat it as a collision (forward failed) → reroute using a different action.\n"
-                        "- If the last few actions are all turns (2 or 3) and orientation is nearly unchanged, you are looping → choose a different strategy (try forward or opposite turn).\n"
-                        "- Use history and past path to avoid repeating the same failed action sequence.\n"
-                        "=== SSA STAIR TAKEOVER ===\n"
-                        "- SSA is a dedicated local stair traversal controller.\n"
-                        "- Do not decide whether the whole route needs stairs only from the full instruction.\n"
-                        "- If `SSA available: True`, output `Delegate to SSA: Yes` when your current local next step is to approach, enter, traverse, go up, go down, or leave stairs.\n"
-                        "- Being already on stairs is not a reason to reject SSA if the current local task is still stair traversal.\n"
-                        "- If you delegate to SSA, it will take over local low-level actions and later return control.\n"
-                        "- If `SSA available: False`, output `Delegate to SSA: No`.\n"
-                        "=== OUTPUT FORMAT ===\n"
-                        "Delegate to SSA: [Yes/No]\n"
-                        "Action: [0-3]\n"
-                        "Map reasoning: [Describe goal location relative to you in cardinal terms]\n"
-                        "Camera reasoning: [Objects / obstacles seen in current view]\n"
-                        "Navigation reasoning: [Step-by-step plan using map + camera]\n"
-                        "Next step: [Brief plan for next move]"
-                    ),
+                    "content": system_text,
                 },
                 {
                     "role": "user",
@@ -1403,84 +1413,83 @@ class MyGPTAgent(Agent):
 
                     generated_text = self.extract_llm_text(response.choices[0].message)
                     if not generated_text:
-                        generated_text = (
-                            "Delegate to SSA: No\n"
-                            "Action: 1\n"
-                            "Next step: Empty LLM response; continue cautiously."
-                        )
+                        generated_text = "Action: 1\nNext step: Empty LLM response; continue cautiously."
+                        if ssa_enabled:
+                            generated_text = "Delegate to SSA: No\n" + generated_text
                         print("[LLM] empty response content; using safe fallback action=1")
                     self.last_action_is_vlm_decision = True
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
-                    llm_requested_ssa = self.parse_ssa_delegate(generated_text)
-                    ssa_after_response = self.ssa_controller.update_proposal(
-                        instruction="",
-                        previous_output=generated_text,
-                        previous_plan=self.previous_plan or "",
-                        rgb=rgb,
-                        depth=observations.get("depth"),
-                        delegate_infer_fn=self._ssa_infer,
-                        delegate_image_infer_fn=self._ssa_infer_with_images,
-                        delegate_image={"rgb": rgb},
-                        delegate_current_stage=self.previous_plan or generated_text,
-                        delegate_history=history_text,
-                        delegate_observation_hint=(
-                            f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
-                        ),
-                    )
-                    if ssa_after_response.get("available", False) and llm_requested_ssa:
-                        ssa_direction = str(ssa_after_response.get("direction", "unknown"))
-                        delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
-                        delegate_reason = str(delegate_info.get("decision_reason", "vlm_gate"))
-                        self.ssa_controller.record_delegate_decision(
-                            step=self.step_count,
-                            delegated=True,
-                            current_stage=self.previous_plan or "",
-                            history=history_text,
-                            prompt_has_rgb=bool(delegate_info.get("prompt_has_rgb", False)),
-                            raw_response=str(delegate_info.get("raw_response", "") or generated_text),
-                            reason=delegate_reason,
-                            direction=ssa_direction,
-                        )
-                        self.ssa_controller.record_plan_outcome(
-                            step=self.step_count,
-                            accepted=True,
-                            reason="closed_loop_ready",
-                            planned_actions=0,
-                        )
-                        self.ssa_controller.start_takeover(
-                            direction=ssa_direction,
-                            step=self.step_count,
+                    if ssa_enabled:
+                        llm_requested_ssa = self.parse_ssa_delegate(generated_text)
+                        ssa_after_response = self.ssa_controller.update_proposal(
+                            instruction="",
+                            previous_output=generated_text,
+                            previous_plan=self.previous_plan or "",
                             rgb=rgb,
                             depth=observations.get("depth"),
-                            oracle_exit=select_oracle_exit_for_episode(
-                                env.current_episode,
-                                current_position=self._ssa_current_position(env),
-                                direction=ssa_direction,
+                            delegate_infer_fn=self._ssa_infer,
+                            delegate_image_infer_fn=self._ssa_infer_with_images,
+                            delegate_image={"rgb": rgb},
+                            delegate_current_stage=self.previous_plan or generated_text,
+                            delegate_history=history_text,
+                            delegate_observation_hint=(
+                                f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
                             ),
                         )
-                        print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
-                        ssa_action = self._ssa_run_takeover(
-                            observations,
-                            info,
-                            env,
-                            instruction,
-                            current_direction,
-                            current_yaw,
-                        )
-                        if ssa_action is not None:
-                            return ssa_action
-                    elif ssa_after_response.get("available", False):
-                        self.ssa_controller.record_delegate_decision(
-                            step=self.step_count,
-                            delegated=False,
-                            current_stage=self.previous_plan or "",
-                            history=history_text,
-                            raw_response=generated_text,
-                            reason="llm_declined",
-                            direction=str(ssa_after_response.get("direction", "unknown")),
-                        )
+                        if ssa_after_response.get("available", False) and llm_requested_ssa:
+                            ssa_direction = str(ssa_after_response.get("direction", "unknown"))
+                            delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
+                            delegate_reason = str(delegate_info.get("decision_reason", "vlm_gate"))
+                            self.ssa_controller.record_delegate_decision(
+                                step=self.step_count,
+                                delegated=True,
+                                current_stage=self.previous_plan or "",
+                                history=history_text,
+                                prompt_has_rgb=bool(delegate_info.get("prompt_has_rgb", False)),
+                                raw_response=str(delegate_info.get("raw_response", "") or generated_text),
+                                reason=delegate_reason,
+                                direction=ssa_direction,
+                            )
+                            self.ssa_controller.record_plan_outcome(
+                                step=self.step_count,
+                                accepted=True,
+                                reason="closed_loop_ready",
+                                planned_actions=0,
+                            )
+                            self.ssa_controller.start_takeover(
+                                direction=ssa_direction,
+                                step=self.step_count,
+                                rgb=rgb,
+                                depth=observations.get("depth"),
+                                oracle_exit=select_oracle_exit_for_episode(
+                                    env.current_episode,
+                                    current_position=self._ssa_current_position(env),
+                                    direction=ssa_direction,
+                                ),
+                            )
+                            print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
+                            ssa_action = self._ssa_run_takeover(
+                                observations,
+                                info,
+                                env,
+                                instruction,
+                                current_direction,
+                                current_yaw,
+                            )
+                            if ssa_action is not None:
+                                return ssa_action
+                        elif ssa_after_response.get("available", False):
+                            self.ssa_controller.record_delegate_decision(
+                                step=self.step_count,
+                                delegated=False,
+                                current_stage=self.previous_plan or "",
+                                history=history_text,
+                                raw_response=generated_text,
+                                reason="llm_declined",
+                                direction=str(ssa_after_response.get("direction", "unknown")),
+                            )
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):
