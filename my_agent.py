@@ -36,6 +36,7 @@ from shared.llm_adapter import build_chat_extra_body, extract_message_text
 from shared.ssa import SSAController, adjust_habitat_episode_step_count
 from shared.ssa.oracle import select_oracle_exit_for_episode
 from shared.ssa.trajectory import save_trajectory_debug
+from shared.visualization import EpisodeGifRecorder
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -150,6 +151,9 @@ def evaluate_agent(
     ssa_detector_model_source="",
     filter_behind=False,
     ssa_max_takeovers_per_episode=1,
+    save_episode_gif=True,
+    gif_max_width=640,
+    gif_duration=0.4,
     oracle_exit_enable=False,
 ) -> None:
     enable_use_of_cache = False
@@ -165,13 +169,26 @@ def evaluate_agent(
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
         ssa_max_takeovers_per_episode=ssa_max_takeovers_per_episode,
+        require_map=save_episode_gif,
+        gif_max_width=gif_max_width,
+        gif_duration=gif_duration,
         oracle_exit_enable=oracle_exit_enable,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
     EARLY_STOP_ROTATION = int(getattr(config.EVAL, "EARLY_STOP_ROTATION", 0) or 0)
     EARLY_STOP_STEPS = int(getattr(config.EVAL, "EARLY_STOP_STEPS", 100) or 0)
 
-    target_key = {"distance_to_goal", "success", "spl", "path_length", "oracle_success"}
+    target_key = {
+        "collisions",
+        "distance_to_goal",
+        "ndtw",
+        "oracle_success",
+        "path_length",
+        "sdtw",
+        "spl",
+        "steps_taken",
+        "success",
+    }
 
     count = 0
     evaluated_stats = {}
@@ -569,12 +586,16 @@ class MyGPTAgent(Agent):
         ssa_detector_model_source="",
         filter_behind=False,
         ssa_max_takeovers_per_episode=1,
+        gif_max_width=640,
+        gif_duration=0.4,
         oracle_exit_enable=False,
     ):
         # print("Initialize MyGPTAgent")
 
         self.result_path = result_path
         self.require_map = require_map
+        self.gif_max_width = int(gif_max_width)
+        self.gif_duration = float(gif_duration)
         self.workspace_root = workspace_root
 
         self.total_costs_of_calls = []
@@ -966,10 +987,15 @@ class MyGPTAgent(Agent):
     def save_episode_gif(self):
         if not self.require_map or len(self.topdown_map_list) == 0:
             return
-        output_video_path = os.path.join(
-            self.result_path, "video", "{}.gif".format(self.episode_id)
+        recorder = EpisodeGifRecorder(
+            os.path.join(self.result_path, "video"),
+            enabled=True,
+            max_width=self.gif_max_width,
+            duration=self.gif_duration,
+            annotate=False,
         )
-        imageio.mimsave(output_video_path, self.topdown_map_list)
+        recorder.extend_frames(self.topdown_map_list)
+        recorder.save(self.episode_id)
 
     def _ssa_current_position(self, env):
         return [float(v) for v in env.sim.get_agent_state().position.tolist()]

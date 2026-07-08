@@ -132,6 +132,10 @@ def main():
         default=None,
         help="Comma-separated episode ids to evaluate, e.g. 1413,1370,1371.",
     )
+    parser.add_argument("--save-episode-gif", dest="save_episode_gif", action="store_true", default=True, help="Save one GIF per evaluated episode.")
+    parser.add_argument("--no-save-episode-gif", dest="save_episode_gif", action="store_false", help="Disable episode GIF recording.")
+    parser.add_argument("--gif-max-width", type=int, default=640, help="Maximum saved GIF frame width.")
+    parser.add_argument("--gif-duration", type=float, default=0.4, help="GIF frame duration in seconds.")
     args = parser.parse_args()
     run_exp(**vars(args))
 
@@ -143,6 +147,8 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             ssa_max_takeovers_per_episode: int = 1,
             max_steps: int = None,
             resume: bool = False, episode_id: str = None,
+            save_episode_gif: bool = True, gif_max_width: int = 640,
+            gif_duration: float = 0.4,
             oracle_exit_enable: bool = False,
             opts=None) -> None:
     config = get_config(exp_config, opts)
@@ -207,6 +213,9 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
         ssa_max_takeovers_per_episode=ssa_max_takeovers_per_episode,
+        save_episode_gif=save_episode_gif,
+        gif_max_width=gif_max_width,
+        gif_duration=gif_duration,
         oracle_exit_enable=oracle_exit_enable,
     )
 
