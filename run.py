@@ -105,6 +105,9 @@ def main():
         default="",
         help="Optional local GroundingDINO model directory.",
     )
+    parser.add_argument("--disable-ssa-oracle-entry-gate", action="store_true", help="Disable oracle entry-position gate for SSA takeover.")
+    parser.add_argument("--ssa-oracle-entry-radius", type=float, default=1.5, help="Entry radius in meters for oracle SSA gate.")
+    parser.add_argument("--expert-entry-pose", action="store_true", help="Teleport to expert stair entry pose before SSA takeover for diagnostics.")
     parser.add_argument(
         "--filter-behind",
         action="store_true",
@@ -145,6 +148,9 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             ssa_checkpoint: str = "", ssa_detect_threshold: float = 0.30,
             ssa_detector_model_source: str = "", filter_behind: bool = False,
             ssa_max_takeovers_per_episode: int = 1,
+            disable_ssa_oracle_entry_gate: bool = False,
+            ssa_oracle_entry_radius: float = 1.5,
+            expert_entry_pose: bool = False,
             max_steps: int = None,
             resume: bool = False, episode_id: str = None,
             save_episode_gif: bool = True, gif_max_width: int = 640,
@@ -213,6 +219,9 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         ssa_detector_model_source=ssa_detector_model_source,
         filter_behind=filter_behind,
         ssa_max_takeovers_per_episode=ssa_max_takeovers_per_episode,
+        oracle_entry_gate_enable=not bool(disable_ssa_oracle_entry_gate),
+        oracle_entry_radius=ssa_oracle_entry_radius,
+        expert_entry_pose=expert_entry_pose,
         save_episode_gif=save_episode_gif,
         gif_max_width=gif_max_width,
         gif_duration=gif_duration,

@@ -155,6 +155,9 @@ def evaluate_agent(
     gif_max_width=640,
     gif_duration=0.4,
     oracle_exit_enable=False,
+    oracle_entry_gate_enable=True,
+    oracle_entry_radius=1.5,
+    expert_entry_pose=False,
 ) -> None:
     enable_use_of_cache = False
     enable_adding_to_cache = False # should be false if we do not have enable_use_of_cache
@@ -173,6 +176,9 @@ def evaluate_agent(
         gif_max_width=gif_max_width,
         gif_duration=gif_duration,
         oracle_exit_enable=oracle_exit_enable,
+        oracle_entry_gate_enable=oracle_entry_gate_enable,
+        oracle_entry_radius=oracle_entry_radius,
+        expert_entry_pose=expert_entry_pose,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
     EARLY_STOP_ROTATION = int(getattr(config.EVAL, "EARLY_STOP_ROTATION", 0) or 0)
@@ -589,6 +595,9 @@ class MyGPTAgent(Agent):
         gif_max_width=640,
         gif_duration=0.4,
         oracle_exit_enable=False,
+        oracle_entry_gate_enable=True,
+        oracle_entry_radius=1.5,
+        expert_entry_pose=False,
     ):
         # print("Initialize MyGPTAgent")
 
@@ -596,6 +605,7 @@ class MyGPTAgent(Agent):
         self.require_map = require_map
         self.gif_max_width = int(gif_max_width)
         self.gif_duration = float(gif_duration)
+        self.expert_entry_pose = bool(expert_entry_pose)
         self.workspace_root = workspace_root
 
         self.total_costs_of_calls = []
@@ -628,6 +638,8 @@ class MyGPTAgent(Agent):
             detector_model_source=ssa_detector_model_source or None,
             filter_behind=filter_behind,
             oracle_exit_enabled=oracle_exit_enable,
+            oracle_entry_gate_enabled=oracle_entry_gate_enable,
+            oracle_entry_radius_m=float(oracle_entry_radius),
             max_takeovers_per_episode=int(ssa_max_takeovers_per_episode),
         )
 
@@ -1000,6 +1012,28 @@ class MyGPTAgent(Agent):
     def _ssa_current_position(self, env):
         return [float(v) for v in env.sim.get_agent_state().position.tolist()]
 
+    def _ssa_apply_expert_entry_pose(self, env, observations, oracle_segment):
+        position = list(getattr(oracle_segment, "start_position", []) or [])
+        if len(position) < 3:
+            return observations
+        yaw = getattr(oracle_segment, "start_yaw", None)
+        rotation = env.sim.get_agent_state().rotation
+        if yaw is not None:
+            angle = float(yaw) + np.pi
+            rotation = np.quaternion(np.cos(angle / 2.0), 0, np.sin(angle / 2.0), 0)
+        try:
+            return env.sim.get_observations_at(
+                np.asarray(position, dtype=np.float32),
+                rotation,
+                keep_agent_at_new_pose=True,
+            )
+        except Exception:
+            try:
+                env.sim.set_agent_state(np.asarray(position, dtype=np.float32), rotation)
+            except Exception:
+                pass
+        return observations
+
     @staticmethod
     def _ssa_action_to_id(action_name):
         return {"FORWARD": 1, "LEFT": 2, "RIGHT": 3}.get(str(action_name), 1)
@@ -1279,6 +1313,8 @@ class MyGPTAgent(Agent):
                     delegate_observation_hint=(
                         f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
                     ),
+                    current_position=self._ssa_current_position(env),
+                    oracle_episode=env.current_episode,
                 )
                 self.ssa_controller.record_step_proposal(
                     step=self.step_count,
@@ -1463,6 +1499,8 @@ class MyGPTAgent(Agent):
                             delegate_observation_hint=(
                                 f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
                             ),
+                            current_position=self._ssa_current_position(env),
+                            oracle_episode=env.current_episode,
                         )
                         if ssa_after_response.get("available", False) and llm_requested_ssa:
                             ssa_direction = str(ssa_after_response.get("direction", "unknown"))
@@ -1484,16 +1522,24 @@ class MyGPTAgent(Agent):
                                 reason="closed_loop_ready",
                                 planned_actions=0,
                             )
+                            oracle_segment = ssa_after_response.get("_oracle_segment") or select_oracle_exit_for_episode(
+                                env.current_episode,
+                                current_position=self._ssa_current_position(env),
+                                direction=ssa_direction,
+                            )
+                            if self.expert_entry_pose and oracle_segment is not None:
+                                observations = self._ssa_apply_expert_entry_pose(env, observations, oracle_segment)
+                                rgb = observations.get("rgb", rgb)
                             self.ssa_controller.start_takeover(
                                 direction=ssa_direction,
                                 step=self.step_count,
                                 rgb=rgb,
                                 depth=observations.get("depth"),
-                                oracle_exit=select_oracle_exit_for_episode(
-                                    env.current_episode,
-                                    current_position=self._ssa_current_position(env),
-                                    direction=ssa_direction,
-                                ),
+                                oracle_exit=oracle_segment,
+                                pre_align={
+                                    "action": "EXPERT_ENTRY_POSE",
+                                    "enabled": bool(self.expert_entry_pose),
+                                } if self.expert_entry_pose else None,
                             )
                             print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
                             ssa_action = self._ssa_run_takeover(
