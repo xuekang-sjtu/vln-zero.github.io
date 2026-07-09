@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.eval_metrics import format_episode_metric
 from shared.llm_adapter import build_chat_extra_body, extract_message_text
 from shared.ssa import SSAController, adjust_habitat_episode_step_count
-from shared.ssa.oracle import select_oracle_exit_for_episode
+from shared.ssa.oracle import proposal_oracle_segment
 from shared.ssa.trajectory import save_trajectory_debug
 from shared.visualization import EpisodeGifRecorder
 
@@ -159,8 +159,8 @@ def evaluate_agent(
     oracle_entry_radius=1.5,
     expert_entry_pose=False,
 ) -> None:
-    enable_use_of_cache = False
-    enable_adding_to_cache = False # should be false if we do not have enable_use_of_cache
+    enable_use_of_cache = True
+    enable_adding_to_cache = True
 
     env = Env(config.TASK_CONFIG, dataset)
     agent = MyGPTAgent(
@@ -458,6 +458,8 @@ def evaluate_agent(
         result_dict = dict()
         result_dict = {k: info[k] for k in target_key if k in info}
         result_dict["id"] = env.current_episode.episode_id
+        result_dict["vlm_timeouts"] = int(getattr(agent, "vlm_timeouts", 0))
+        result_dict["vlm_parse_errors"] = int(getattr(agent, "vlm_parse_errors", 0))
         count += 1
 
         with open(
@@ -783,7 +785,13 @@ class MyGPTAgent(Agent):
                 return action_num
 
         print("No valid action found, defaulting to 0 (stop)")
+        self.vlm_parse_errors += 1
         return 0
+
+    def _record_vlm_exception(self, error: Exception) -> None:
+        text = f"{type(error).__name__}: {error}".lower()
+        if "timeout" in text or "timed out" in text:
+            self.vlm_timeouts += 1
 
     def parse_next_step(self, generated_text: str) -> str:
         match = re.search(
@@ -986,6 +994,8 @@ class MyGPTAgent(Agent):
         self.count_id += 1
         self.pending_action_list = []
         self.total_costs_of_calls = []
+        self.vlm_timeouts = 0
+        self.vlm_parse_errors = 0
         self.ssa_controller.reset()
         self.pending_ssa_prediction = None
         self.pending_ssa_before_position = None
@@ -1013,26 +1023,34 @@ class MyGPTAgent(Agent):
         return [float(v) for v in env.sim.get_agent_state().position.tolist()]
 
     def _ssa_apply_expert_entry_pose(self, env, observations, oracle_segment):
-        position = list(getattr(oracle_segment, "start_position", []) or [])
-        if len(position) < 3:
-            return observations
+        position = np.asarray(getattr(oracle_segment, "start_position", None), dtype=np.float32)
+        if position.shape != (3,):
+            raise ValueError(f"VLN-Zero expert entry pose requires a 3D position, got {position.shape}")
         yaw = getattr(oracle_segment, "start_yaw", None)
         rotation = env.sim.get_agent_state().rotation
         if yaw is not None:
             angle = float(yaw) + np.pi
             rotation = np.quaternion(np.cos(angle / 2.0), 0, np.sin(angle / 2.0), 0)
-        try:
-            return env.sim.get_observations_at(
-                np.asarray(position, dtype=np.float32),
-                rotation,
-                keep_agent_at_new_pose=True,
+        teleported = env.sim.get_observations_at(
+            position,
+            rotation,
+            keep_agent_at_new_pose=True,
+        )
+        if not isinstance(teleported, dict):
+            raise TypeError(
+                "VLN-Zero expert entry pose must return a dict observation, "
+                f"got {type(teleported).__name__}"
             )
-        except Exception:
-            try:
-                env.sim.set_agent_state(np.asarray(position, dtype=np.float32), rotation)
-            except Exception:
-                pass
-        return observations
+        actual = np.asarray(env.sim.get_agent_state().position, dtype=np.float32)
+        error_m = float(np.linalg.norm(actual - position))
+        if error_m > 1e-3:
+            raise RuntimeError(
+                f"VLN-Zero expert entry pose mismatch: expected={position.tolist()} "
+                f"actual={actual.tolist()} error_m={error_m:.6f}"
+            )
+        merged = dict(observations)
+        merged.update(teleported)
+        return merged
 
     @staticmethod
     def _ssa_action_to_id(action_name):
@@ -1475,6 +1493,7 @@ class MyGPTAgent(Agent):
 
                     generated_text = self.extract_llm_text(response.choices[0].message)
                     if not generated_text:
+                        self.vlm_parse_errors += 1
                         generated_text = "Action: 1\nNext step: Empty LLM response; continue cautiously."
                         if ssa_enabled:
                             generated_text = "Delegate to SSA: No\n" + generated_text
@@ -1522,12 +1541,15 @@ class MyGPTAgent(Agent):
                                 reason="closed_loop_ready",
                                 planned_actions=0,
                             )
-                            oracle_segment = ssa_after_response.get("_oracle_segment") or select_oracle_exit_for_episode(
-                                env.current_episode,
-                                current_position=self._ssa_current_position(env),
-                                direction=ssa_direction,
+                            oracle_segment = proposal_oracle_segment(
+                                ssa_after_response,
+                                required=(
+                                    bool(self.expert_entry_pose)
+                                    or bool(self.ssa_controller.oracle_exit_enabled)
+                                ),
+                                context="VLN-Zero",
                             )
-                            if self.expert_entry_pose and oracle_segment is not None:
+                            if self.expert_entry_pose:
                                 observations = self._ssa_apply_expert_entry_pose(env, observations, oracle_segment)
                                 rgb = observations.get("rgb", rgb)
                             self.ssa_controller.start_takeover(
@@ -1535,10 +1557,16 @@ class MyGPTAgent(Agent):
                                 step=self.step_count,
                                 rgb=rgb,
                                 depth=observations.get("depth"),
-                                oracle_exit=oracle_segment,
+                                oracle_exit=(
+                                    oracle_segment
+                                    if self.ssa_controller.oracle_exit_enabled
+                                    else None
+                                ),
                                 pre_align={
                                     "action": "EXPERT_ENTRY_POSE",
                                     "enabled": bool(self.expert_entry_pose),
+                                    "position": list(oracle_segment.start_position),
+                                    "yaw": oracle_segment.start_yaw,
                                 } if self.expert_entry_pose else None,
                             )
                             print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
@@ -1607,6 +1635,7 @@ class MyGPTAgent(Agent):
                     self.last_action_is_vlm_decision = not use_cached_action
 
             except Exception as e:
+                self._record_vlm_exception(e)
                 print(f"API Error: {e}")
                 traceback.print_exc()
                 self.pending_action_list.append(random.randint(1, 3))
