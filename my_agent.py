@@ -425,14 +425,26 @@ def evaluate_agent(
                 action = {"action": 0}
 
             iter_step += 1
-            if isinstance(action, dict) and action.get("_ssa_takeover"):
+            ssa_takeover_executed = bool(isinstance(action, dict) and action.get("_ssa_takeover"))
+            if ssa_takeover_executed:
                 obs = agent.last_ssa_takeover_observation
                 info = agent.last_ssa_takeover_info
                 action = {"action": action.get("action", 1)}
+                who_acted = "ssa"
+                cached_path_in_progress = False
+                current_subpath_in_progress = False
+                desired_ori_turning_required = False
+                cached_waypoints_to_visit = []
+                cached_action_list_to_follow = []
+                current_subpath_action_index = 0
+                cwtv_index = 0
+                old_waypoint = None
+                old_initial_orientation = None
+                cached_temp_path = []
             else:
                 obs = env.step(action)
                 info = env.get_metrics()
-            cached_temp_path.append(action)
+                cached_temp_path.append(action)
             
             # FOR LOGGING
             #cached_locations_LOG.append(info['top_down_map_vlnce']['agent_map_coord']) # 2D MAP COORDS
@@ -803,16 +815,6 @@ class MyGPTAgent(Agent):
             return next_step
         else:
             return ""
-
-    def parse_ssa_delegate(self, generated_text: str) -> bool:
-        match = re.search(
-            r"Delegate to SSA:\s*(yes|no|true|false)",
-            generated_text,
-            re.IGNORECASE,
-        )
-        if not match:
-            return False
-        return match.group(1).strip().lower() in {"yes", "true"}
 
     def extract_llm_text(self, message) -> str:
         return extract_message_text(message)
@@ -1195,14 +1197,79 @@ class MyGPTAgent(Agent):
             self.last_ssa_takeover_actions = list(actions)
             self.last_action = actions[-1]
             self.last_action_source = "ssa"
-            self.previous_plan = self.previous_plan or "SSA stair takeover finished."
-            self.previous_output = self.previous_output or "SSA takeover completed."
+            self.previous_plan = "Re-evaluate the remaining instruction after SSA handoff."
+            self.previous_output = self.ssa_controller.latest_handoff_text()
             return {"action": actions[-1], "_ssa_takeover": True}
 
         self.last_ssa_takeover_observation = None
         self.last_ssa_takeover_info = None
         self.last_ssa_takeover_actions = []
         return None
+
+    def _ssa_start_from_proposal(
+        self,
+        proposal,
+        observations,
+        info,
+        env,
+        instruction,
+        history_text,
+        episode_id,
+        current_direction,
+        current_yaw,
+    ):
+        direction = str(proposal.get("direction", "unknown"))
+        delegate = proposal.get("delegate", {}) if isinstance(proposal.get("delegate"), dict) else {}
+        self.ssa_controller.record_delegate_decision(
+            step=self.step_count,
+            delegated=True,
+            current_stage=self.previous_plan or self.previous_output or instruction,
+            history=history_text,
+            prompt_has_rgb=bool(delegate.get("prompt_has_rgb", False)),
+            raw_response=str(delegate.get("raw_response", "")),
+            reason=str(delegate.get("decision_reason", "vlm_gate")),
+            direction=direction,
+        )
+        self.ssa_controller.record_plan_outcome(
+            step=self.step_count,
+            accepted=True,
+            reason="closed_loop_ready",
+            planned_actions=0,
+        )
+        oracle_segment = proposal_oracle_segment(
+            proposal,
+            required=bool(self.expert_entry_pose) or bool(self.ssa_controller.oracle_exit_enabled),
+            context="VLN-Zero",
+        )
+        if self.expert_entry_pose:
+            observations = self._ssa_apply_expert_entry_pose(env, observations, oracle_segment)
+        rgb = observations["rgb"]
+        self.ssa_controller.start_takeover(
+            direction=direction,
+            step=self.step_count,
+            rgb=rgb,
+            depth=observations.get("depth"),
+            oracle_exit=oracle_segment if self.ssa_controller.oracle_exit_enabled else None,
+            pre_align={
+                "action": "EXPERT_ENTRY_POSE",
+                "enabled": True,
+                "position": list(oracle_segment.start_position),
+                "yaw": oracle_segment.start_yaw,
+            } if self.expert_entry_pose else None,
+        )
+        print(
+            f"[SSA] step={self.step_count} episode={episode_id} "
+            f"delegated=yes mode=closed_loop direction={direction}"
+        )
+        action = self._ssa_run_takeover(
+            observations,
+            info,
+            env,
+            instruction,
+            current_direction,
+            current_yaw,
+        )
+        return action, observations
 
     def _get_instruction(self, observations, env):
         if self._cached_instruction is not None:
@@ -1312,8 +1379,6 @@ class MyGPTAgent(Agent):
                     if sum(a in [2, 3] for a in last_actions) == len(last_actions):
                         history_text += "\n⚠️ Warning: Loop detected (rotating in place).\n"  # If repeated turns, agent is stuck in loop
 
-            map_img_str = self.get_topdown_map_base64(info, rgb.shape)
-            image_data = self.encode_image(rgb)
             ssa_enabled = bool(getattr(self.ssa_controller, "enabled", False))
             ssa_proposal = {"available": False, "reason": "disabled"}
             if ssa_enabled:
@@ -1360,6 +1425,23 @@ class MyGPTAgent(Agent):
                     f"available={bool(ssa_proposal.get('available', False))} "
                     f"reason={ssa_proposal.get('reason', '')}"
                 )
+                if ssa_proposal.get("available", False):
+                    ssa_action, observations = self._ssa_start_from_proposal(
+                        ssa_proposal,
+                        observations,
+                        info,
+                        env,
+                        instruction,
+                        history_text,
+                        episode_id,
+                        current_direction,
+                        current_yaw,
+                    )
+                    if ssa_action is not None:
+                        return ssa_action
+                    rgb = observations.get("rgb", rgb)
+            map_img_str = self.get_topdown_map_base64(info, rgb.shape)
+            image_data = self.encode_image(rgb)
             # map_img_str = self.get_topdown_map_base64(info, rgb.shape)
             user_text = (
                 f"Navigate to approach the red square on the top down map using the top-down map and camera view.\n\n"
@@ -1378,12 +1460,6 @@ class MyGPTAgent(Agent):
 
             if history_text:
                 user_text += "=== HISTORY CONTEXT ===\n" + history_text + "\n"
-
-            if ssa_enabled:
-                user_text += (
-                    "=== SSA STAIR TAKEOVER ===\n"
-                    f"SSA available: {'True' if ssa_proposal.get('available', False) else 'False'}\n"
-                )
 
             # Output options for actions
             user_text += (
@@ -1425,20 +1501,7 @@ class MyGPTAgent(Agent):
                 "- If the last few actions are all turns (2 or 3) and orientation is nearly unchanged, you are looping → choose a different strategy (try forward or opposite turn).\n"
                 "- Use history and past path to avoid repeating the same failed action sequence.\n"
             )
-            if ssa_enabled:
-                system_text += (
-                    "=== SSA STAIR TAKEOVER ===\n"
-                    "- SSA is a dedicated local stair traversal controller.\n"
-                    "- Do not decide whether the whole route needs stairs only from the full instruction.\n"
-                    "- If `SSA available: True`, output `Delegate to SSA: Yes` when your current local next step is to approach, enter, traverse, go up, go down, or leave stairs.\n"
-                    "- Being already on stairs is not a reason to reject SSA if the current local task is still stair traversal.\n"
-                    "- If you delegate to SSA, it will take over local low-level actions and later return control.\n"
-                    "- If `SSA available: False`, output `Delegate to SSA: No`.\n"
-                    "=== OUTPUT FORMAT ===\n"
-                    "Delegate to SSA: [Yes/No]\n"
-                )
-            else:
-                system_text += "=== OUTPUT FORMAT ===\n"
+            system_text += "=== OUTPUT FORMAT ===\n"
             system_text += (
                 "Action: [0-3]\n"
                 "Map reasoning: [Describe goal location relative to you in cardinal terms]\n"
@@ -1495,101 +1558,11 @@ class MyGPTAgent(Agent):
                     if not generated_text:
                         self.vlm_parse_errors += 1
                         generated_text = "Action: 1\nNext step: Empty LLM response; continue cautiously."
-                        if ssa_enabled:
-                            generated_text = "Delegate to SSA: No\n" + generated_text
                         print("[LLM] empty response content; using safe fallback action=1")
                     self.last_action_is_vlm_decision = True
                     self.total_costs_of_calls.append(openai_api_calculate_cost(response.usage))
                     self.previous_plan = self.parse_next_step(generated_text)
                     self.previous_output = generated_text
-                    if ssa_enabled:
-                        llm_requested_ssa = self.parse_ssa_delegate(generated_text)
-                        ssa_after_response = self.ssa_controller.update_proposal(
-                            instruction="",
-                            previous_output=generated_text,
-                            previous_plan=self.previous_plan or "",
-                            rgb=rgb,
-                            depth=observations.get("depth"),
-                            delegate_infer_fn=self._ssa_infer,
-                            delegate_image_infer_fn=self._ssa_infer_with_images,
-                            delegate_image={"rgb": rgb},
-                            delegate_current_stage=self.previous_plan or generated_text,
-                            delegate_history=history_text,
-                            delegate_observation_hint=(
-                                f"distance_to_goal={info.get('distance_to_goal', 'unknown')}"
-                            ),
-                            current_position=self._ssa_current_position(env),
-                            oracle_episode=env.current_episode,
-                        )
-                        if ssa_after_response.get("available", False) and llm_requested_ssa:
-                            ssa_direction = str(ssa_after_response.get("direction", "unknown"))
-                            delegate_info = ssa_after_response.get("delegate", {}) if isinstance(ssa_after_response.get("delegate"), dict) else {}
-                            delegate_reason = str(delegate_info.get("decision_reason", "vlm_gate"))
-                            self.ssa_controller.record_delegate_decision(
-                                step=self.step_count,
-                                delegated=True,
-                                current_stage=self.previous_plan or "",
-                                history=history_text,
-                                prompt_has_rgb=bool(delegate_info.get("prompt_has_rgb", False)),
-                                raw_response=str(delegate_info.get("raw_response", "") or generated_text),
-                                reason=delegate_reason,
-                                direction=ssa_direction,
-                            )
-                            self.ssa_controller.record_plan_outcome(
-                                step=self.step_count,
-                                accepted=True,
-                                reason="closed_loop_ready",
-                                planned_actions=0,
-                            )
-                            oracle_segment = proposal_oracle_segment(
-                                ssa_after_response,
-                                required=(
-                                    bool(self.expert_entry_pose)
-                                    or bool(self.ssa_controller.oracle_exit_enabled)
-                                ),
-                                context="VLN-Zero",
-                            )
-                            if self.expert_entry_pose:
-                                observations = self._ssa_apply_expert_entry_pose(env, observations, oracle_segment)
-                                rgb = observations.get("rgb", rgb)
-                            self.ssa_controller.start_takeover(
-                                direction=ssa_direction,
-                                step=self.step_count,
-                                rgb=rgb,
-                                depth=observations.get("depth"),
-                                oracle_exit=(
-                                    oracle_segment
-                                    if self.ssa_controller.oracle_exit_enabled
-                                    else None
-                                ),
-                                pre_align={
-                                    "action": "EXPERT_ENTRY_POSE",
-                                    "enabled": bool(self.expert_entry_pose),
-                                    "position": list(oracle_segment.start_position),
-                                    "yaw": oracle_segment.start_yaw,
-                                } if self.expert_entry_pose else None,
-                            )
-                            print(f"[SSA] step={self.step_count} episode={episode_id} delegated=yes mode=closed_loop direction={ssa_direction}")
-                            ssa_action = self._ssa_run_takeover(
-                                observations,
-                                info,
-                                env,
-                                instruction,
-                                current_direction,
-                                current_yaw,
-                            )
-                            if ssa_action is not None:
-                                return ssa_action
-                        elif ssa_after_response.get("available", False):
-                            self.ssa_controller.record_delegate_decision(
-                                step=self.step_count,
-                                delegated=False,
-                                current_stage=self.previous_plan or "",
-                                history=history_text,
-                                raw_response=generated_text,
-                                reason="llm_declined",
-                                direction=str(ssa_after_response.get("direction", "unknown")),
-                            )
                     action_index = self.parse_action_number(generated_text)
                 else:
                     if (type(cached_action) == dict):
