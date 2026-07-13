@@ -108,6 +108,7 @@ def main():
     parser.add_argument("--disable-ssa-oracle-entry-gate", action="store_true", help="Disable oracle entry-position gate for SSA takeover.")
     parser.add_argument("--ssa-oracle-entry-radius", type=float, default=1.5, help="Entry radius in meters for oracle SSA gate.")
     parser.add_argument("--expert-entry-pose", action="store_true", help="Teleport to expert stair entry pose before SSA takeover for diagnostics.")
+    parser.add_argument("--ssa-oracle-expert-replay", action="store_true", help="Replay exact expert stair actions instead of the SSA policy.")
     parser.add_argument(
         "--filter-behind",
         action="store_true",
@@ -151,6 +152,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             disable_ssa_oracle_entry_gate: bool = False,
             ssa_oracle_entry_radius: float = 1.5,
             expert_entry_pose: bool = False,
+            ssa_oracle_expert_replay: bool = False,
             max_steps: int = None,
             resume: bool = False, episode_id: str = None,
             save_episode_gif: bool = True, gif_max_width: int = 640,
@@ -158,6 +160,8 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
             oracle_exit_enable: bool = False,
             opts=None) -> None:
     config = get_config(exp_config, opts)
+    if ssa_oracle_expert_replay and (not ssa_guidance or disable_ssa_oracle_entry_gate):
+        raise ValueError("--ssa-oracle-expert-replay requires --ssa-guidance and the oracle entry gate")
     if max_steps is not None:
         config.defrost()
         config.TASK_CONFIG.ENVIRONMENT.MAX_EPISODE_STEPS = int(max_steps)
@@ -165,7 +169,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         config.freeze()
         print(f"[CONFIG] MAX_EPISODE_STEPS overridden to {max_steps}")
     if ssa_guidance:
-        if not str(ssa_checkpoint or "").strip():
+        if not ssa_oracle_expert_replay and not str(ssa_checkpoint or "").strip():
             raise ValueError("--ssa-guidance requires an explicit --ssa-checkpoint")
         print(f"[SSA] enabled | checkpoint={ssa_checkpoint} | detect_threshold={ssa_detect_threshold}")
         config = enable_depth_sensor_for_ssa(config)
@@ -222,6 +226,7 @@ def run_exp(exp_config: str, split_num: str, split_id: str, result_path: str,
         oracle_entry_gate_enable=not bool(disable_ssa_oracle_entry_gate),
         oracle_entry_radius=ssa_oracle_entry_radius,
         expert_entry_pose=expert_entry_pose,
+        ssa_oracle_expert_replay=ssa_oracle_expert_replay,
         save_episode_gif=save_episode_gif,
         gif_max_width=gif_max_width,
         gif_duration=gif_duration,

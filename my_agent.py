@@ -6,6 +6,7 @@ import json
 import numpy as np
 from habitat import Env
 from habitat.core.agent import Agent
+from habitat.sims.habitat_simulator.actions import HabitatSimActions
 from tqdm import trange
 import os
 import re
@@ -28,12 +29,21 @@ import time
 import statistics
 import sys
 import traceback
+import gzip
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.eval_metrics import format_episode_metric
 from shared.llm_adapter import build_chat_extra_body, extract_message_text
-from shared.ssa import SSAController, adjust_habitat_episode_step_count
+from shared.ssa import (
+    EXPERT_REPLAY_TURN_DEGREES,
+    SSAController,
+    adjust_habitat_episode_step_count,
+    expert_actions_for_segment,
+    expert_exit_reached,
+    expert_record_for_episode,
+    temporary_habitat_sim_turn_angle,
+)
 from shared.ssa.oracle import proposal_oracle_segment
 from shared.ssa.trajectory import save_trajectory_debug
 from shared.visualization import EpisodeGifRecorder
@@ -101,6 +111,9 @@ def try_get_cached_path(node1, node2, curr_sg):
         path = None
         #print("No path found between the specified nodes using eligible edges.")
 
+    # A source equal to target yields [node], which is not an executable edge.
+    if path is not None and len(path) < 2:
+        return None
     return path
 
 def find_best_cached_jump(graph, start_node, goal_node):
@@ -158,11 +171,20 @@ def evaluate_agent(
     oracle_entry_gate_enable=True,
     oracle_entry_radius=1.5,
     expert_entry_pose=False,
+    ssa_oracle_expert_replay=False,
 ) -> None:
     enable_use_of_cache = True
     enable_adding_to_cache = True
 
     env = Env(config.TASK_CONFIG, dataset)
+    expert_gt_data = None
+    if ssa_oracle_expert_replay:
+        gt_path = config.TASK_CONFIG.TASK.NDTW.GT_PATH.format(
+            split=config.TASK_CONFIG.DATASET.SPLIT,
+            role=getattr(config.TASK_CONFIG.DATASET, "ROLE", "guide"),
+        )
+        with gzip.open(gt_path, "rt", encoding="utf-8") as handle:
+            expert_gt_data = json.load(handle)
     agent = MyGPTAgent(
         result_path,
         workspace_root=WORKSPACE_ROOT,
@@ -179,6 +201,8 @@ def evaluate_agent(
         oracle_entry_gate_enable=oracle_entry_gate_enable,
         oracle_entry_radius=oracle_entry_radius,
         expert_entry_pose=expert_entry_pose,
+        ssa_oracle_expert_replay=ssa_oracle_expert_replay,
+        expert_gt_data=expert_gt_data,
     )
     num_episodes = len(env.episodes) # You can customize this to a low number (e.g. 5) to run on a small subset of examples.
     EARLY_STOP_ROTATION = int(getattr(config.EVAL, "EARLY_STOP_ROTATION", 0) or 0)
@@ -612,6 +636,8 @@ class MyGPTAgent(Agent):
         oracle_entry_gate_enable=True,
         oracle_entry_radius=1.5,
         expert_entry_pose=False,
+        ssa_oracle_expert_replay=False,
+        expert_gt_data=None,
     ):
         # print("Initialize MyGPTAgent")
 
@@ -620,6 +646,8 @@ class MyGPTAgent(Agent):
         self.gif_max_width = int(gif_max_width)
         self.gif_duration = float(gif_duration)
         self.expert_entry_pose = bool(expert_entry_pose)
+        self.ssa_oracle_expert_replay = bool(ssa_oracle_expert_replay)
+        self.expert_gt_data = expert_gt_data
         self.workspace_root = workspace_root
 
         self.total_costs_of_calls = []
@@ -655,6 +683,7 @@ class MyGPTAgent(Agent):
             oracle_entry_gate_enabled=oracle_entry_gate_enable,
             oracle_entry_radius_m=float(oracle_entry_radius),
             max_takeovers_per_episode=int(ssa_max_takeovers_per_episode),
+            oracle_expert_replay=self.ssa_oracle_expert_replay,
         )
 
         # print("Initialization Complete")
@@ -1206,6 +1235,64 @@ class MyGPTAgent(Agent):
         self.last_ssa_takeover_actions = []
         return None
 
+    def _ssa_run_oracle_expert_replay(
+        self, observations, info, env, instruction, current_direction, current_yaw, segment
+    ):
+        record = expert_record_for_episode(self.expert_gt_data, self.episode_id)
+        actions = expert_actions_for_segment(record, segment)
+        current_obs = observations
+        current_info = info
+        self.ssa_controller.start_oracle_expert_replay(
+            direction=segment.direction,
+            step=self.step_count,
+            oracle_segment=segment,
+            pre_align={
+                "action": "EXPERT_ENTRY_POSE",
+                "position": list(segment.start_position),
+                "yaw": segment.start_yaw,
+            },
+        )
+        with temporary_habitat_sim_turn_angle(
+            env.sim,
+            degrees=EXPERT_REPLAY_TURN_DEGREES,
+            left_action=HabitatSimActions.TURN_LEFT,
+            right_action=HabitatSimActions.TURN_RIGHT,
+        ):
+            for action_id in actions:
+                before = self._ssa_current_position(env)
+                self._ssa_render_trace_frame(
+                    current_obs["rgb"], current_info, instruction,
+                    f"Oracle expert replay action={action_id}", current_direction, current_yaw,
+                )
+                current_obs = env.step({"action": int(action_id)})
+                state = adjust_habitat_episode_step_count(env, -1)
+                current_info = env.get_metrics()
+                done = bool(state.get("episode_over", env.episode_over)) if state else bool(env.episode_over)
+                reason = self.ssa_controller.record_oracle_expert_action(
+                    action_id,
+                    before_position=before,
+                    after_position=self._ssa_current_position(env),
+                    collision=self._ssa_collision_from_info(current_info),
+                    done=done,
+                )
+                if reason and reason != "episode_done":
+                    raise RuntimeError(f"VLN-Zero oracle expert replay interrupted: {reason}")
+                if done:
+                    raise RuntimeError("VLN-Zero episode ended before oracle expert replay reached the exit")
+        if not expert_exit_reached(self._ssa_current_position(env), segment, radius_m=1.0):
+            raise RuntimeError("VLN-Zero oracle expert replay did not reach its recorded exit")
+        self.ssa_controller.finish_takeover("oracle_expert_replay", success=True)
+        adjust_habitat_episode_step_count(env, 1)
+        current_info = env.get_metrics()
+        self.last_ssa_takeover_observation = current_obs
+        self.last_ssa_takeover_info = current_info
+        self.last_ssa_takeover_actions = list(actions)
+        self.last_action = actions[-1]
+        self.last_action_source = "ssa"
+        self.previous_plan = "Re-evaluate the remaining instruction after oracle expert replay."
+        self.previous_output = self.ssa_controller.latest_handoff_text()
+        return {"action": actions[-1], "_ssa_takeover": True}
+
     def _ssa_start_from_proposal(
         self,
         proposal,
@@ -1238,11 +1325,20 @@ class MyGPTAgent(Agent):
         )
         oracle_segment = proposal_oracle_segment(
             proposal,
-            required=bool(self.expert_entry_pose) or bool(self.ssa_controller.oracle_exit_enabled),
+            required=(
+                bool(self.expert_entry_pose)
+                or bool(self.ssa_oracle_expert_replay)
+                or bool(self.ssa_controller.oracle_exit_enabled)
+            ),
             context="VLN-Zero",
         )
-        if self.expert_entry_pose:
+        if self.expert_entry_pose or self.ssa_oracle_expert_replay:
             observations = self._ssa_apply_expert_entry_pose(env, observations, oracle_segment)
+        if self.ssa_oracle_expert_replay:
+            action = self._ssa_run_oracle_expert_replay(
+                observations, info, env, instruction, current_direction, current_yaw, oracle_segment
+            )
+            return action, observations
         rgb = observations["rgb"]
         self.ssa_controller.start_takeover(
             direction=direction,
