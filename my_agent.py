@@ -173,8 +173,8 @@ def evaluate_agent(
     expert_entry_pose=False,
     ssa_oracle_expert_replay=False,
 ) -> None:
-    enable_use_of_cache = True
-    enable_adding_to_cache = True
+    enable_use_of_cache = False
+    enable_adding_to_cache = False
 
     env = Env(config.TASK_CONFIG, dataset)
     expert_gt_data = None
