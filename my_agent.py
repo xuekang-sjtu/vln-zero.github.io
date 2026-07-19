@@ -1254,7 +1254,9 @@ class MyGPTAgent(Agent):
         )
         with temporary_habitat_sim_turn_angle(
             env.sim,
-            degrees=EXPERT_REPLAY_TURN_DEGREES,
+            degrees=float(
+                getattr(segment, "expert_turn_degrees", EXPERT_REPLAY_TURN_DEGREES)
+            ),
             left_action=HabitatSimActions.TURN_LEFT,
             right_action=HabitatSimActions.TURN_RIGHT,
         ):

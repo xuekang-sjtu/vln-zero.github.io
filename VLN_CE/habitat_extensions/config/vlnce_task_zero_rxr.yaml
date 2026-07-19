@@ -46,6 +46,6 @@ DATASET:
   TYPE: RxR-VLN-CE-v1
   SPLIT: val_unseen
   ROLES: [guide]  # "*", "guide", "follower"
-  LANGUAGES: [en-US, en-IN]  #  "*", "te-IN", "hi-IN", "en-US", "en-IN"
+  LANGUAGES: [en-US]  #  "*", "te-IN", "hi-IN", "en-US", "en-IN"
   DATA_PATH: ../datasets/datasets/RxR_VLNCE_v0/{split}/{split}_{role}.json.gz
   SCENES_DIR: ../datasets/scene_datasets
